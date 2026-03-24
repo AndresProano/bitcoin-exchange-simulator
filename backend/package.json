@@ -1,0 +1,17 @@
+{
+  "name": "bitcoin-exchange-backend",
+  "version": "1.0.0",
+  "description": "Simulated Bitcoin Exchange - Node.js/Express Backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "better-sqlite3": "^11.7.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.1",
+    "socket.io": "^4.8.1"
+  }
+}

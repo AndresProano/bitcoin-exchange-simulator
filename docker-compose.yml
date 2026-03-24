@@ -1,0 +1,216 @@
+x-miner-common: &miner-common
+  image: byandyx/btc-miner:latest
+  build:
+    context: ./miner
+  restart: unless-stopped
+  depends_on:
+    node1:
+      condition: service_started
+    node2:
+      condition: service_started
+    backend:
+      condition: service_started
+  environment:
+    BITCOIN_RPC_USER: bitcoin
+    BITCOIN_RPC_PASS: bitcoin
+    BITCOIN_RPC_PORT: "18443"
+    BACKEND_URL: "http://backend:3001"
+  networks:
+    - btcnet
+
+services:
+  # ── Bitcoin Core Nodes ──
+  node1:
+    image: bitcoin/bitcoin:29.3
+    container_name: node1
+    command:
+      - bitcoind
+      - -regtest
+      - -server
+      - -rpcuser=bitcoin
+      - -rpcpassword=bitcoin
+      - -rpcallowip=0.0.0.0/0
+      - -rpcbind=0.0.0.0
+      - -port=18444
+      - -rpcport=18443
+      - -connect=node2:18444
+      - -fallbackfee=0.0001
+      - -txindex=1
+      - -printtoconsole
+    volumes:
+      - node1-data:/home/bitcoin/.bitcoin
+    networks:
+      - btcnet
+
+  node2:
+    image: bitcoin/bitcoin:29.3
+    container_name: node2
+    command:
+      - bitcoind
+      - -regtest
+      - -server
+      - -rpcuser=bitcoin
+      - -rpcpassword=bitcoin
+      - -rpcallowip=0.0.0.0/0
+      - -rpcbind=0.0.0.0
+      - -port=18444
+      - -rpcport=18443
+      - -connect=node1:18444
+      - -fallbackfee=0.0001
+      - -txindex=1
+      - -printtoconsole
+    volumes:
+      - node2-data:/home/bitcoin/.bitcoin
+    networks:
+      - btcnet
+
+  # ── Backend ──
+  backend:
+    image: byandyx/btc-backend:latest
+    build:
+      context: ./backend
+    container_name: backend
+    ports:
+      - "3001:3001"
+    environment:
+      BITCOIN_RPC_HOST: node1
+      BITCOIN_RPC_PORT: "18443"
+      BITCOIN_RPC_USER: bitcoin
+      BITCOIN_RPC_PASS: bitcoin
+    depends_on:
+      - node1
+      - node2
+    networks:
+      - btcnet
+
+  # ── Frontend ──
+  frontend:
+    image: byandyx/btc-frontend:latest
+    build:
+      context: ./frontend
+    container_name: frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - btcnet
+
+  # ── Miners (10) ──
+  miner-1:
+    <<: *miner-common
+    container_name: miner-1
+    environment:
+      MINER_ID: miner-1
+      BITCOIN_RPC_HOST: node1
+      BITCOIN_RPC_USER: bitcoin
+      BITCOIN_RPC_PASS: bitcoin
+      BITCOIN_RPC_PORT: "18443"
+      BACKEND_URL: "http://backend:3001"
+
+  miner-2:
+    <<: *miner-common
+    container_name: miner-2
+    environment:
+      MINER_ID: miner-2
+      BITCOIN_RPC_HOST: node1
+      BITCOIN_RPC_USER: bitcoin
+      BITCOIN_RPC_PASS: bitcoin
+      BITCOIN_RPC_PORT: "18443"
+      BACKEND_URL: "http://backend:3001"
+
+  miner-3:
+    <<: *miner-common
+    container_name: miner-3
+    environment:
+      MINER_ID: miner-3
+      BITCOIN_RPC_HOST: node2
+      BITCOIN_RPC_USER: bitcoin
+      BITCOIN_RPC_PASS: bitcoin
+      BITCOIN_RPC_PORT: "18443"
+      BACKEND_URL: "http://backend:3001"
+
+  miner-4:
+    <<: *miner-common
+    container_name: miner-4
+    environment:
+      MINER_ID: miner-4
+      BITCOIN_RPC_HOST: node2
+      BITCOIN_RPC_USER: bitcoin
+      BITCOIN_RPC_PASS: bitcoin
+      BITCOIN_RPC_PORT: "18443"
+      BACKEND_URL: "http://backend:3001"
+
+  miner-5:
+    <<: *miner-common
+    container_name: miner-5
+    environment:
+      MINER_ID: miner-5
+      BITCOIN_RPC_HOST: node1
+      BITCOIN_RPC_USER: bitcoin
+      BITCOIN_RPC_PASS: bitcoin
+      BITCOIN_RPC_PORT: "18443"
+      BACKEND_URL: "http://backend:3001"
+
+  miner-6:
+    <<: *miner-common
+    container_name: miner-6
+    environment:
+      MINER_ID: miner-6
+      BITCOIN_RPC_HOST: node2
+      BITCOIN_RPC_USER: bitcoin
+      BITCOIN_RPC_PASS: bitcoin
+      BITCOIN_RPC_PORT: "18443"
+      BACKEND_URL: "http://backend:3001"
+
+  miner-7:
+    <<: *miner-common
+    container_name: miner-7
+    environment:
+      MINER_ID: miner-7
+      BITCOIN_RPC_HOST: node1
+      BITCOIN_RPC_USER: bitcoin
+      BITCOIN_RPC_PASS: bitcoin
+      BITCOIN_RPC_PORT: "18443"
+      BACKEND_URL: "http://backend:3001"
+
+  miner-8:
+    <<: *miner-common
+    container_name: miner-8
+    environment:
+      MINER_ID: miner-8
+      BITCOIN_RPC_HOST: node2
+      BITCOIN_RPC_USER: bitcoin
+      BITCOIN_RPC_PASS: bitcoin
+      BITCOIN_RPC_PORT: "18443"
+      BACKEND_URL: "http://backend:3001"
+
+  miner-9:
+    <<: *miner-common
+    container_name: miner-9
+    environment:
+      MINER_ID: miner-9
+      BITCOIN_RPC_HOST: node1
+      BITCOIN_RPC_USER: bitcoin
+      BITCOIN_RPC_PASS: bitcoin
+      BITCOIN_RPC_PORT: "18443"
+      BACKEND_URL: "http://backend:3001"
+
+  miner-10:
+    <<: *miner-common
+    container_name: miner-10
+    environment:
+      MINER_ID: miner-10
+      BITCOIN_RPC_HOST: node2
+      BITCOIN_RPC_USER: bitcoin
+      BITCOIN_RPC_PASS: bitcoin
+      BITCOIN_RPC_PORT: "18443"
+      BACKEND_URL: "http://backend:3001"
+
+volumes:
+  node1-data:
+  node2-data:
+
+networks:
+  btcnet:
+    driver: bridge
