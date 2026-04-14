@@ -13,6 +13,31 @@ coordinator, a SQLite exchange database, and a React user interface.
 
 ================================================================================
 
+QUICK START (DOCKER HUB)
+------------------------
+
+All application images are published on Docker Hub as multi-arch manifests
+(linux/amd64 and linux/arm64). Docker will automatically pull the correct
+variant for your machine (Intel/AMD, Apple Silicon, ARM servers, etc.).
+
+Pull the images directly:
+
+    docker pull byandyx/btc-backend:latest
+    docker pull byandyx/btc-frontend:latest
+    docker pull byandyx/btc-miner:latest
+    docker pull bitcoin/bitcoin:29.3
+
+Or, from the repository root, let Docker Compose do it:
+
+    docker compose pull
+    docker compose up -d
+
+Then open the frontend at:
+
+    http://localhost:3000
+
+================================================================================
+
 TEAM MEMBERS
 ------------
 
@@ -153,12 +178,21 @@ OPTION 1: Using Docker Hub images (recommended for grading)
     docker compose pull
     docker compose up -d
 
-  This uses the published images referenced in docker-compose.yml:
+  This uses the published images referenced in docker-compose.yml. All
+  application images are multi-arch (linux/amd64 + linux/arm64), so the same
+  commands work on Intel/AMD hosts and on Apple Silicon / ARM hosts:
 
-    bitcoin/bitcoin:29.3
-    byandyx/btc-miner:latest
-    byandyx/btc-backend:latest
-    byandyx/btc-frontend:latest
+    bitcoin/bitcoin:29.3            (official Bitcoin Core image)
+    byandyx/btc-backend:latest      amd64 + arm64
+    byandyx/btc-frontend:latest     amd64 + arm64
+    byandyx/btc-miner:latest        amd64 + arm64
+
+  If you prefer to pull the images manually before starting:
+
+    docker pull byandyx/btc-backend:latest
+    docker pull byandyx/btc-frontend:latest
+    docker pull byandyx/btc-miner:latest
+    docker pull bitcoin/bitcoin:29.3
 
   Monitor startup:
 
@@ -193,6 +227,40 @@ OPTION 2: Building from source
 
   This rebuilds the local backend, frontend, and miner images before running
   the system.
+
+OPTION 3: Publishing your own multi-arch images (maintainers only)
+
+  This is how the byandyx/btc-* images above were built and pushed. Log in
+  to Docker Hub first, then create a multi-arch builder (only needed once):
+
+    docker login
+    docker buildx create --name multi --use --bootstrap
+
+  From the repository root, build and push each image for amd64 and arm64
+  in a single step:
+
+    docker buildx build \
+      --platform linux/amd64,linux/arm64 \
+      -t <your-namespace>/btc-backend:latest \
+      --push ./backend
+
+    docker buildx build \
+      --platform linux/amd64,linux/arm64 \
+      -t <your-namespace>/btc-frontend:latest \
+      --push ./frontend
+
+    docker buildx build \
+      --platform linux/amd64,linux/arm64 \
+      -t <your-namespace>/btc-miner:latest \
+      --push ./miner
+
+  Verify the published manifest lists both architectures:
+
+    docker buildx imagetools inspect <your-namespace>/btc-backend:latest
+
+  Note: `docker build` by itself only produces a single-arch image for the
+  host machine. Use `docker buildx build --platform ... --push` to publish
+  a true multi-arch manifest.
 
 ================================================================================
 
