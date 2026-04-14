@@ -31,15 +31,83 @@ BACKEND_URL = os.environ.get("BACKEND_URL", "http://backend:3001")
 
 COINBASE_MATURITY = 100  # regtest uses 100 confirmations for maturity
 
+# RPC configuration
+RPC_TIMEOUT = 30
+RPC_RETRIES = 3
+RPC_INITIAL_BACKOFF_MS = 500
+DEBUG_MODE = False  # Set to True to see debug logs
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO if not DEBUG_MODE else logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
     stream=sys.stdout,
 )
 log = logging.getLogger("miner")
+
+# ---------------------------------------------------------------------------
+# Structured logging helper
+# ---------------------------------------------------------------------------
+def log_structured(event, level, **data):
+    """Output structured JSON logs with miner_id."""
+    # Skip debug logs unless DEBUG_MODE is enabled
+    if level == "debug" and not DEBUG_MODE:
+        return
+    
+    timestamp = datetime.now().isoformat()
+    message = json.dumps({
+        "timestamp": timestamp,
+        "miner_id": MINER_ID,
+        "event": event,
+        "level": level,
+        **data,
+    })
+    
+    if level == "debug":
+        log.debug(message)
+    elif level == "info":
+        log.info(message)
+    elif level == "warning":
+        log.warning(message)
+    elif level == "error":
+        log.error(message)
+    else:
+        log.info(message)
+
+# ---------------------------------------------------------------------------
+# Retry helper with exponential backoff
+# ---------------------------------------------------------------------------
+def rpc_call_with_retry(method, params=None, wallet=None, max_retries=RPC_RETRIES):
+    """Make RPC call with exponential backoff retry."""
+    if params is None:
+        params = []
+    
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return rpc_call(method, params, wallet)
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                backoff_ms = RPC_INITIAL_BACKOFF_MS * (2 ** (attempt - 1))
+                log_structured("rpc_retry", "warning", 
+                    method=method,
+                    attempt=attempt,
+                    max_retries=max_retries,
+                    error_msg=str(e),
+                    backoff_ms=backoff_ms,
+                )
+                time.sleep(backoff_ms / 1000.0)
+            else:
+                log_structured("rpc_max_retries_exceeded", "error",
+                    method=method,
+                    max_retries=max_retries,
+                    error_msg=str(e),
+                )
+    
+    raise last_error
 
 # ---------------------------------------------------------------------------
 # Flask app
@@ -60,6 +128,9 @@ miner_state = {
     "wallet_name": None,
     "exchange_deposit_address": None,
     "treasury_address": None,
+    "transfer_in_progress": False,     # Prevent concurrent transfers
+    "pending_deposits": [],             # Track deposits waiting for confirmation
+    "successful_txids": [],             # Track successful transfers to prevent re-sending
 }
 
 mining_thread = None
@@ -96,17 +167,23 @@ def rpc_call(method, params=None, wallet=None):
 
 def wait_for_node():
     """Block until Bitcoin Core RPC is reachable."""
-    log.info("Waiting for Bitcoin Core RPC to become available ...")
+    log_structured("waiting_for_node", "info")
+    attempt = 0
     while True:
+        attempt += 1
         try:
             info = rpc_call("getblockchaininfo")
-            log.info(
-                "Bitcoin Core reachable  chain=%s  blocks=%s",
-                info["chain"],
-                info["blocks"],
+            log_structured("node_connected", "info",
+                chain=info["chain"],
+                blocks=info["blocks"],
+                attempt=attempt,
             )
             return
         except Exception:
+            if attempt % 5 == 0:  # Log every 5 attempts
+                log_structured("node_connection_attempt", "debug",
+                    attempt=attempt,
+                )
             time.sleep(2)
 
 
@@ -115,30 +192,54 @@ def setup_wallet():
     wallet_name = MINER_ID.replace("-", "_")
 
     # Check loaded wallets
-    loaded = rpc_call("listwallets")
+    try:
+        loaded = rpc_call("listwallets")
+    except Exception as e:
+        log_structured("listwallets_failed", "error", error=str(e))
+        raise
+
     if wallet_name in loaded:
-        log.info("Wallet '%s' already loaded.", wallet_name)
+        log_structured("wallet_already_loaded", "debug", wallet_name=wallet_name)
     else:
         # Try to create; if it exists on disk, load it
         try:
             rpc_call("createwallet", [wallet_name])
-            log.info("Created wallet '%s'.", wallet_name)
+            log_structured("wallet_created", "info", wallet_name=wallet_name)
         except Exception as e:
             if "already exists" in str(e).lower():
                 try:
                     rpc_call("loadwallet", [wallet_name])
-                    log.info("Loaded existing wallet '%s'.", wallet_name)
+                    log_structured("wallet_loaded", "info", wallet_name=wallet_name)
                 except Exception as e2:
                     if "already loaded" in str(e2).lower():
-                        log.info("Wallet '%s' already loaded.", wallet_name)
+                        log_structured("wallet_already_loaded", "debug", wallet_name=wallet_name)
                     else:
+                        log_structured("wallet_load_failed", "error",
+                            wallet_name=wallet_name,
+                            error=str(e2),
+                        )
                         raise
             else:
+                log_structured("wallet_create_failed", "error",
+                    wallet_name=wallet_name,
+                    error=str(e),
+                )
                 raise
 
     # Get a receiving address
-    address = rpc_call("getnewaddress", ["mining_reward", "bech32"], wallet=wallet_name)
-    log.info("Miner reward address: %s", address)
+    try:
+        address = rpc_call("getnewaddress", ["mining_reward", "bech32"], wallet=wallet_name)
+    except Exception as e:
+        log_structured("getnewaddress_failed", "error",
+            wallet_name=wallet_name,
+            error=str(e),
+        )
+        raise
+
+    log_structured("wallet_setup_complete", "info",
+        wallet_name=wallet_name,
+        address=address,
+    )
 
     with state_lock:
         miner_state["wallet_name"] = wallet_name
@@ -190,19 +291,31 @@ def bytes_to_hex_le(b):
 def encode_script_height(height):
     """
     BIP34: encode block height as minimally-encoded CScriptNum for the
-    coinbase scriptSig.  Returns the bytes to embed (length-prefix + LE int).
+    coinbase scriptSig. Returns the bytes to embed (length-prefix + LE int).
+    This must match Bitcoin Core's exact CScript integer encoding.
     """
     if height == 0:
-        return b"\x01\x00"
-    # Determine the number of bytes needed
+        return b"\x00"  # Empty for height 0
+    
+    # For small heights (1-16), Bitcoin uses direct opcodes
+    if height <= 16:
+        # OP_1 through OP_16 are 0x51 through 0x60
+        return bytes([0x50 + height])
+    
+    # For larger heights, encode as minimally-encoded little-endian integer
     n = height
     data = bytearray()
+    
+    # Build little-endian representation
     while n > 0:
         data.append(n & 0xFF)
         n >>= 8
-    # If the top bit is set, append a 0x00 byte so it is not interpreted as negative
+    
+    # If MSB is set, add a sign byte to avoid misinterpretation as negative
     if data[-1] & 0x80:
-        data.append(0)
+        data.append(0x00)
+    
+    # Return: length-prefixed encoding (CScript format)
     return bytes([len(data)]) + bytes(data)
 
 
@@ -467,7 +580,7 @@ def target_from_bits(bits_hex):
 
 def mining_loop():
     """Main mining loop running in a background thread."""
-    log.info("Mining loop started for %s", MINER_ID)
+    log_structured("mining_loop_started", "info")
 
     with state_lock:
         address = miner_state["miner_address"]
@@ -476,26 +589,42 @@ def mining_loop():
         try:
             mine_one_block(address)
         except Exception as e:
-            log.error("Mining error: %s", e)
-            log.debug(traceback.format_exc())
+            log_structured("mining_error", "error",
+                error=str(e),
+                traceback=traceback.format_exc(),
+            )
             if stop_event.wait(timeout=2):
                 break
 
-    log.info("Mining loop stopped.")
+    log_structured("mining_loop_stopped", "info")
 
 
 def mine_one_block(address):
     """Attempt to mine one block."""
-    # Get block template
-    template = rpc_call("getblocktemplate", [{"rules": ["segwit"]}])
-    target = target_from_bits(template["bits"])
-    height = template["height"]
-    prev_hash = template["previousblockhash"]
+    # Get block template with retry logic
+    try:
+        template = rpc_call_with_retry("getblocktemplate", [{"rules": ["segwit"]}], max_retries=3)
+    except Exception as e:
+        log_structured("getblocktemplate_failed", "error",
+            error=str(e),
+        )
+        return
+    
+    try:
+        target = target_from_bits(template["bits"])
+        height = template["height"]
+        prev_hash = template["previousblockhash"]
+    except (KeyError, ValueError) as e:
+        log_structured("template_parse_error", "error",
+            error=str(e),
+        )
+        return
 
-    log.info(
-        "Got template: height=%d  prev=%s...  txns=%d  target=%064x",
-        height, prev_hash[:16], len(template.get("transactions", [])),
-        target,
+    log_structured("block_template_received", "info",
+        height=height,
+        prev_hash=prev_hash[:16],
+        transactions=len(template.get("transactions", [])),
+        bits=template["bits"],
     )
 
     extra_nonce = 0
@@ -503,7 +632,15 @@ def mine_one_block(address):
 
     while not stop_event.is_set():
         # Build candidate block for this extra_nonce
-        header_bytes, tx_data = build_block(template, address, extra_nonce)
+        try:
+            header_bytes, tx_data = build_block(template, address, extra_nonce)
+        except Exception as e:
+            log_structured("block_build_error", "error",
+                extra_nonce=extra_nonce,
+                error=str(e),
+            )
+            return
+        
         header_array = bytearray(header_bytes)
 
         # Iterate nonce space
@@ -514,13 +651,17 @@ def mine_one_block(address):
             # Check for stale block every 50000 nonces
             if nonce > 0 and nonce % 50000 == 0:
                 try:
-                    tip = rpc_call("getbestblockhash")
+                    tip = rpc_call_with_retry("getbestblockhash", max_retries=2)
                     if tip != prev_hash:
-                        log.info(
-                            "Stale block detected (tip changed). Restarting template."
+                        log_structured("stale_template_detected", "info",
+                            current_tip=tip[:16],
+                            template_prev=prev_hash[:16],
                         )
                         return  # will re-enter mine_one_block with fresh template
-                except Exception:
+                except Exception as e:
+                    log_structured("stale_check_failed", "warning",
+                        error=str(e),
+                    )
                     pass
 
             # Set nonce in header (bytes 76-80)
@@ -534,27 +675,41 @@ def mine_one_block(address):
                 # Found a valid block!
                 block_hex = bytes(header_array).hex() + tx_data.hex()
                 block_hash_display = block_hash[::-1].hex()
-                log.info(
-                    "*** BLOCK FOUND ***  height=%d  hash=%s  nonce=%d  extra=%d",
-                    height, block_hash_display, nonce, extra_nonce,
+                log_structured("block_found", "info",
+                    height=height,
+                    hash=block_hash_display,
+                    nonce=nonce,
+                    extra_nonce=extra_nonce,
                 )
 
-                # Submit block
+                # Submit block with retry logic
                 try:
-                    result = rpc_call("submitblock", [block_hex])
+                    result = rpc_call_with_retry("submitblock", [block_hex], max_retries=3)
                     if result is None or result == "":
-                        log.info("Block accepted by node!")
+                        log_structured("block_accepted", "info",
+                            height=height,
+                            hash=block_hash_display,
+                        )
                         on_block_mined(height, template["coinbasevalue"])
                     else:
-                        log.warning("Block rejected: %s", result)
+                        log_structured("block_rejected", "warning",
+                            height=height,
+                            hash=block_hash_display,
+                            reason=result,
+                        )
                 except Exception as e:
-                    log.error("submitblock error: %s", e)
+                    log_structured("submitblock_error", "error",
+                        height=height,
+                        error=str(e),
+                    )
 
                 return  # move on to next block
 
         # Exhausted nonce space for this extra_nonce; bump extra_nonce
         extra_nonce += 1
-        log.debug("Exhausted nonce space, extra_nonce now %d", extra_nonce)
+        log_structured("nonce_space_exhausted", "debug",
+            extra_nonce=extra_nonce,
+        )
 
 
 def on_block_mined(height, reward_satoshis):
@@ -570,6 +725,13 @@ def on_block_mined(height, reward_satoshis):
             "timestamp": time.time(),
         })
 
+    log_structured("block_mined_updated_state", "info",
+        height=height,
+        blocks_total=miner_state["blocks_mined"],
+        reward_btc=reward_btc,
+        total_btc_gained=miner_state["btc_gained"],
+    )
+
     # Report to backend
     report_to_backend()
 
@@ -583,9 +745,13 @@ def report_to_backend():
         status = get_full_status()
         url = f"{BACKEND_URL}/api/miner-update"
         resp = requests.post(url, json=status, timeout=10)
-        log.info("Reported to backend: %s", resp.status_code)
+        log_structured("backend_update_sent", "debug",
+            status_code=resp.status_code,
+        )
     except Exception as e:
-        log.warning("Failed to report to backend: %s", e)
+        log_structured("backend_update_failed", "warning",
+            error=str(e),
+        )
 
 
 def get_full_status():
@@ -600,13 +766,25 @@ def get_full_status():
     btc_mature = 0.0
     btc_immature = 0.0
     try:
-        balances = rpc_call("getbalances", wallet=wallet_name)
+        balances = rpc_call_with_retry("getbalances", wallet=wallet_name, max_retries=2)
         # "mine" contains trusted, untrusted_pending, immature
         mine_bal = balances.get("mine", {})
         btc_mature = float(mine_bal.get("trusted", 0))
         btc_immature = float(mine_bal.get("immature", 0))
+        
+        # Log balance details every time
+        if btc_immature > 0 and btc_mature > 0:
+            log_structured("balance_calculation", "debug",
+                blocks=blocks_mined,
+                mature=btc_mature,
+                immature=btc_immature,
+                total=btc_mature + btc_immature,
+                threshold=threshold,
+            )
     except Exception as e:
-        log.warning("Could not fetch wallet balances: %s", e)
+        log_structured("wallet_balance_fetch_failed", "warning",
+            error=str(e),
+        )
 
     btc_available = btc_mature  # trusted balance is spendable
 
@@ -633,102 +811,218 @@ def fetch_addresses_from_backend():
         resp = requests.get(url, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
+            addresses_updated = False
             with state_lock:
                 if data.get("exchange_deposit_address"):
                     miner_state["exchange_deposit_address"] = data["exchange_deposit_address"]
+                    addresses_updated = True
                 if data.get("treasury_address"):
                     miner_state["treasury_address"] = data["treasury_address"]
+                    addresses_updated = True
+            
+            if addresses_updated:
+                log_structured("addresses_updated", "debug",
+                    exchange_addr=data.get("exchange_deposit_address", "")[:12],
+                    treasury_addr=data.get("treasury_address", "")[:12],
+                )
             return True
     except Exception as e:
-        log.warning("Failed to fetch addresses from backend: %s", e)
+        log_structured("addresses_fetch_failed", "warning",
+            error=str(e),
+        )
     return False
 
 
+def fetch_threshold_from_backend():
+    """Recover the persisted threshold from the backend after restarts."""
+    try:
+        url = f"{BACKEND_URL}/api/threshold"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            threshold = float(data.get("threshold", 0))
+            with state_lock:
+                previous_threshold = miner_state["threshold"]
+                miner_state["threshold"] = threshold
+
+            if previous_threshold != threshold:
+                log_structured("threshold_recovered", "info", threshold=threshold)
+            return True
+    except Exception as e:
+        log_structured("threshold_fetch_failed", "warning",
+            error=str(e),
+        )
+    return False
+
+
+def add_pending_deposit(txid, amount):
+    """Track a sent deposit transaction until the backend verifies it."""
+    with state_lock:
+        for deposit in miner_state["pending_deposits"]:
+            if deposit["txid"] == txid:
+                deposit["timestamp"] = time.time()
+                return
+        miner_state["pending_deposits"].append({
+            "txid": txid,
+            "amount": amount,
+            "timestamp": time.time(),
+            "retry_count": 0,
+        })
+
+
 def check_and_transfer():
-    """If mature balance >= threshold, transfer funds."""
+    """If mature balance >= threshold, transfer funds (once per threshold event)."""
     with state_lock:
         threshold = miner_state["threshold"]
         wallet_name = miner_state["wallet_name"]
         exchange_addr = miner_state["exchange_deposit_address"]
         treasury_addr = miner_state["treasury_address"]
+        transfer_in_progress = miner_state["transfer_in_progress"]
+        pending_deposits = list(miner_state["pending_deposits"])
 
     if threshold is None or threshold <= 0:
+        return
+    
+    if transfer_in_progress:
+        return
+
+    if pending_deposits:
+        log_structured("transfer_waiting_for_pending_deposit", "debug",
+            pending_count=len(pending_deposits),
+        )
         return
 
     # Get current mature balance
     try:
-        balances = rpc_call("getbalances", wallet=wallet_name)
+        balances = rpc_call_with_retry("getbalances", wallet=wallet_name, max_retries=2)
         mature = float(balances.get("mine", {}).get("trusted", 0))
     except Exception as e:
-        log.warning("Could not get balance for transfer check: %s", e)
+        log_structured("balance_fetch_failed", "warning", error=str(e))
         return
 
     if mature < threshold:
         return
 
+    # Log when balance meets threshold
+    log_structured("threshold_reached", "info", 
+        mature_btc=round(mature, 8),
+        threshold=threshold,
+        exchange_addr_set=bool(exchange_addr),
+        treasury_addr_set=bool(treasury_addr),
+    )
+
     # Fetch latest addresses from backend if we don't have them
     if not exchange_addr or not treasury_addr:
+        log_structured("addresses_not_set", "warning",
+            exchange_addr_set=bool(exchange_addr),
+            treasury_addr_set=bool(treasury_addr),
+        )
         fetch_addresses_from_backend()
         with state_lock:
             exchange_addr = miner_state["exchange_deposit_address"]
             treasury_addr = miner_state["treasury_address"]
 
-    if not exchange_addr:
-        log.warning("No exchange deposit address available, skipping transfer.")
+    if not exchange_addr or not treasury_addr:
+        log_structured("missing_exchange_addresses", "error",
+            threshold=threshold,
+            mature_btc=mature,
+            exchange_addr_set=bool(exchange_addr),
+            treasury_addr_set=bool(treasury_addr),
+        )
         return
 
-    log.info(
-        "Mature balance %.8f >= threshold %.8f, initiating transfer.",
-        mature, threshold,
+    log_structured("initiating_transfer", "info",
+        mature_btc=mature,
+        threshold=threshold,
+        exchange_addr=exchange_addr[:12] + "..." if exchange_addr else "NONE",
+        treasury_addr=treasury_addr[:12] + "..." if treasury_addr else "NONE",
     )
 
+    # Mark transfer as in progress to prevent duplicate concurrent transfers
+    with state_lock:
+        miner_state["transfer_in_progress"] = True
+
     try:
-        # Build the outputs: threshold to exchange, surplus to treasury
+        # Build the outputs: exact threshold to exchange, surplus to treasury.
+        # Bitcoin Core will subtract the transaction fee from the treasury output.
         outputs = {}
         surplus = round(mature - threshold, 8)
 
-        # Reserve a small amount for fees
-        fee_reserve = 0.0001
-        if surplus < fee_reserve:
-            # Send (threshold - fee_reserve) to exchange, nothing to treasury
-            send_amount = round(threshold - fee_reserve, 8)
-            if send_amount <= 0:
-                log.warning("Threshold too small to cover fees.")
-                return
-            outputs[exchange_addr] = send_amount
-        else:
-            outputs[exchange_addr] = round(threshold, 8)
-            if treasury_addr:
-                treasury_amount = round(surplus - fee_reserve, 8)
-                if treasury_amount > 0:
-                    outputs[treasury_addr] = treasury_amount
+        min_treasury_output = 0.0001
+        if surplus <= min_treasury_output:
+            log_structured("waiting_for_fee_surplus", "info",
+                mature_btc=round(mature, 8),
+                threshold=threshold,
+                min_treasury_output=min_treasury_output,
+            )
+            return
 
-        log.info("Transfer outputs: %s", outputs)
+        outputs[exchange_addr] = round(threshold, 8)
+        outputs[treasury_addr] = surplus
 
-        # Use sendmany for atomic multi-output transaction
-        txid = rpc_call(
-            "sendmany",
-            ["", outputs],
-            wallet=wallet_name,
+        log_structured("transfer_outputs_calculated", "debug",
+            outputs={k: v for k, v in outputs.items()},
         )
-        log.info("Transfer sent, txid=%s", txid)
 
-        # Notify backend about the deposit to the exchange
+        # Use sendmany for atomic multi-output transaction (with retry)
         try:
-            exchange_amount = outputs.get(exchange_addr, 0)
-            if exchange_amount > 0:
-                requests.post(
+            txid = rpc_call_with_retry(
+                "sendmany",
+                ["", outputs, 1, "", [treasury_addr]],
+                wallet=wallet_name,
+                max_retries=3,
+            )
+            log_structured("transfer_sent", "info",
+                txid=txid,
+            )
+        except Exception as e:
+            log_structured("sendmany_failed", "error",
+                error=str(e),
+            )
+            return
+
+        # Notify backend about the deposit to the exchange (include txid for on-chain verification)
+        exchange_amount = outputs.get(exchange_addr, 0)
+        if exchange_amount > 0:
+            try:
+                response = requests.post(
                     f"{BACKEND_URL}/api/exchange/deposit",
-                    json={"miner_id": MINER_ID, "amount": exchange_amount},
+                    json={"miner_id": MINER_ID, "amount": exchange_amount, "txid": txid},
                     timeout=10,
                 )
-                log.info("Reported deposit of %.8f BTC to exchange", exchange_amount)
-        except Exception as e:
-            log.warning("Failed to report deposit to backend: %s", e)
+                
+                if response.status_code == 200:
+                    log_structured("deposit_reported", "info",
+                        amount=exchange_amount,
+                        txid=txid,
+                    )
+                    # Mark transfer as successful
+                    with state_lock:
+                        miner_state["successful_txids"].append(txid)
+                        if txid in [d["txid"] for d in miner_state["pending_deposits"]]:
+                            miner_state["pending_deposits"] = [
+                                d for d in miner_state["pending_deposits"] if d["txid"] != txid
+                            ]
+                else:
+                    log_structured("deposit_verification_pending", "info",
+                        txid=txid,
+                        status_code=response.status_code,
+                        amount=exchange_amount,
+                    )
+                    add_pending_deposit(txid, exchange_amount)
+            except Exception as e:
+                log_structured("deposit_report_failed", "warning",
+                    error=str(e),
+                    txid=txid,
+                )
+                add_pending_deposit(txid, exchange_amount)
 
-    except Exception as e:
-        log.error("Transfer failed: %s", e)
-        log.debug(traceback.format_exc())
+        report_to_backend()
+
+    finally:
+        # Always mark transfer as complete
+        with state_lock:
+            miner_state["transfer_in_progress"] = False
 
 
 # ---------------------------------------------------------------------------
@@ -736,19 +1030,82 @@ def check_and_transfer():
 # ---------------------------------------------------------------------------
 
 def address_poller():
-    """Periodically fetch addresses from the backend."""
+    """Periodically fetch coordinator settings from the backend."""
+    log_structured("address_poller_started", "debug")
     while not stop_event.is_set():
         fetch_addresses_from_backend()
+        fetch_threshold_from_backend()
         if stop_event.wait(timeout=30):
             break
+    log_structured("address_poller_stopped", "debug")
 
 
 def balance_checker():
     """Periodically check balance and trigger transfers."""
+    log_structured("balance_checker_started", "debug")
     while not stop_event.is_set():
-        if stop_event.wait(timeout=60):
+        if stop_event.wait(timeout=15):  # Check every 15 seconds instead of 60
             break
         check_and_transfer()
+        retry_pending_deposits()
+    log_structured("balance_checker_stopped", "debug")
+
+
+def retry_pending_deposits():
+    """Retry pending deposits that failed to verify."""
+    with state_lock:
+        pending = list(miner_state["pending_deposits"])  # Copy list
+    
+    if not pending:
+        return
+    
+    now = time.time()
+    for deposit in pending:
+        # Retry after 30 seconds, max 5 times
+        age = now - deposit["timestamp"]
+        if age < 30:
+            continue
+        
+        retry_count = deposit.get("retry_count", 0)
+        if retry_count >= 5:
+            log_structured("deposit_retry_exhausted", "warning",
+                txid=deposit["txid"],
+                amount=deposit["amount"],
+            )
+            with state_lock:
+                miner_state["pending_deposits"] = [
+                    d for d in miner_state["pending_deposits"] if d["txid"] != deposit["txid"]
+                ]
+            continue
+        
+        try:
+            response = requests.post(
+                f"{BACKEND_URL}/api/exchange/deposit",
+                json={"miner_id": MINER_ID, "amount": deposit["amount"], "txid": deposit["txid"]},
+                timeout=10,
+            )
+            
+            if response.status_code == 200:
+                log_structured("deposit_retry_succeeded", "info",
+                    txid=deposit["txid"],
+                    amount=deposit["amount"],
+                    retry_count=retry_count,
+                )
+                with state_lock:
+                    miner_state["pending_deposits"] = [
+                        d for d in miner_state["pending_deposits"] if d["txid"] != deposit["txid"]
+                    ]
+            else:
+                # Increment retry count
+                with state_lock:
+                    for d in miner_state["pending_deposits"]:
+                        if d["txid"] == deposit["txid"]:
+                            d["retry_count"] = retry_count + 1
+        except Exception as e:
+            log_structured("deposit_retry_failed", "debug",
+                txid=deposit["txid"],
+                error=str(e),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -764,21 +1121,36 @@ def api_status():
 @app.route("/threshold", methods=["POST"])
 def api_threshold():
     """Receive threshold from the coordinator."""
-    data = request.get_json(force=True)
-    new_threshold = float(data.get("threshold", 0))
+    try:
+        data = request.get_json(force=True)
+        new_threshold = float(data.get("threshold", 0))
+    except Exception as e:
+        log_structured("threshold_parse_error", "warning", error=str(e))
+        return jsonify({"status": "error", "error": "Invalid threshold format"}), 400
 
     with state_lock:
         miner_state["threshold"] = new_threshold
 
-    log.info("Threshold set to %.8f BTC", new_threshold)
+    log_structured("threshold_set", "info", threshold=new_threshold)
 
     # Also accept optional addresses
     if data.get("exchange_deposit_address"):
         with state_lock:
             miner_state["exchange_deposit_address"] = data["exchange_deposit_address"]
+            log_structured("exchange_address_set", "info",
+                address=data["exchange_deposit_address"][:12] + "...",
+            )
     if data.get("treasury_address"):
         with state_lock:
             miner_state["treasury_address"] = data["treasury_address"]
+            log_structured("treasury_address_set", "info",
+                address=data["treasury_address"][:12] + "...",
+            )
+
+    # Trigger a check immediately (don't wait for next balance_checker cycle)
+    # This makes the transfer happen faster
+    if new_threshold > 0:
+        check_and_transfer()
 
     return jsonify({"status": "ok", "threshold": new_threshold})
 
@@ -796,7 +1168,7 @@ def api_start():
     stop_event.clear()
     mining_thread = threading.Thread(target=mining_loop, daemon=True)
     mining_thread.start()
-    log.info("Mining started via API.")
+    log_structured("mining_started", "info")
     return jsonify({"status": "mining_started"})
 
 
@@ -814,7 +1186,7 @@ def api_stop():
     if mining_thread is not None:
         mining_thread.join(timeout=10)
         mining_thread = None
-    log.info("Mining stopped via API.")
+    log_structured("mining_stopped", "info")
     return jsonify({"status": "mining_stopped"})
 
 
@@ -831,6 +1203,21 @@ def main():
     # Setup wallet
     setup_wallet()
 
+    # Register with backend so it knows we're alive
+    try:
+        requests.post(
+            f"{BACKEND_URL}/api/miner-register",
+            json={"miner_id": MINER_ID},
+            timeout=5,
+        )
+        log_structured("backend_registration", "info", status="registered")
+    except Exception as e:
+        log_structured("backend_registration_failed", "warning", error=str(e))
+
+    # Recover persisted coordinator state before background checks start.
+    fetch_addresses_from_backend()
+    fetch_threshold_from_backend()
+
     # Start background pollers
     poller_thread = threading.Thread(target=address_poller, daemon=True)
     poller_thread.start()
@@ -838,14 +1225,6 @@ def main():
     checker_thread = threading.Thread(target=balance_checker, daemon=True)
     checker_thread.start()
 
-    # Auto-start mining
-    log.info("Auto-starting mining loop ...")
-    with state_lock:
-        miner_state["mining"] = True
-    stop_event.clear()
-    global mining_thread
-    mining_thread = threading.Thread(target=mining_loop, daemon=True)
-    mining_thread.start()
 
     # Run Flask
     log.info("Starting Flask API on port 5000 ...")
