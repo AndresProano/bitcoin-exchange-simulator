@@ -70,9 +70,12 @@ services:
       BITCOIN_RPC_PORT: "18443"
       BITCOIN_RPC_USER: bitcoin
       BITCOIN_RPC_PASS: bitcoin
+      DB_PATH: /app/data/exchange.db
     depends_on:
       - node1
       - node2
+    volumes:
+      - backend-data:/app/data
     networks:
       - btcnet
 
@@ -203,6 +206,7 @@ services:
 volumes:
   node1-data:
   node2-data:
+  backend-data:
 
 networks:
   btcnet:

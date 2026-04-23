@@ -1,20 +1,28 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { io } from 'socket.io-client';
 
-// In production (Docker), use relative URLs through nginx proxy
-// In development, connect directly to backend
 const BACKEND_URL = window.location.hostname === 'localhost' && window.location.port === '5173'
   ? 'http://localhost:3001'
   : '';
 
-const MAX_LOGS = 50;
-const CLIENTS_PER_PAGE = 5;
+const MAX_LOGS = 80;
+const CLIENTS_PER_PAGE = 6;
 
 function App() {
   const [threshold, setThreshold] = useState('');
   const [currentThreshold, setCurrentThreshold] = useState(null);
   const [miners, setMiners] = useState([]);
   const [accounts, setAccounts] = useState([]);
+  const [openOrders, setOpenOrders] = useState([]);
+  const [completedOrders, setCompletedOrders] = useState([]);
+  const [trades, setTrades] = useState([]);
+  const [ownerFees, setOwnerFees] = useState(0);
+
+  const [orderClientId, setOrderClientId] = useState('');
+  const [orderSide, setOrderSide] = useState('buy');
+  const [orderPrice, setOrderPrice] = useState('');
+  const [orderAmount, setOrderAmount] = useState('');
+
   const [status, setStatus] = useState('');
   const [backendStatus, setBackendStatus] = useState('connecting');
   const [systemStatus, setSystemStatus] = useState({ blockchain: { blocks: 0, chain: 'unknown', difficulty: 0 } });
@@ -37,10 +45,61 @@ function App() {
       const res = await fetch(`${BACKEND_URL}/api/accounts`);
       if (res.ok) {
         const data = await res.json();
-        setAccounts(Array.isArray(data) ? data : data.accounts || []);
+        const list = Array.isArray(data) ? data : [];
+        setAccounts(list);
+
+        if (!orderClientId && list.length > 0) {
+          const defaultTrader = list.find((a) => a.type !== 'owner');
+          if (defaultTrader) setOrderClientId(defaultTrader.id);
+        }
       }
     } catch (err) {
       console.error('Failed to fetch accounts:', err);
+    }
+  }, [orderClientId]);
+
+  const fetchOrders = useCallback(async () => {
+    try {
+      const [openRes, completedRes] = await Promise.all([
+        fetch(`${BACKEND_URL}/api/orders/open`),
+        fetch(`${BACKEND_URL}/api/orders/completed`),
+      ]);
+
+      if (openRes.ok) {
+        const data = await openRes.json();
+        setOpenOrders(Array.isArray(data) ? data : []);
+      }
+
+      if (completedRes.ok) {
+        const data = await completedRes.json();
+        setCompletedOrders(Array.isArray(data) ? data : []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch orders:', err);
+    }
+  }, []);
+
+  const fetchTrades = useCallback(async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/trades`);
+      if (res.ok) {
+        const data = await res.json();
+        setTrades(Array.isArray(data) ? data : []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch trades:', err);
+    }
+  }, []);
+
+  const fetchOwnerFees = useCallback(async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/owner/fees`);
+      if (res.ok) {
+        const data = await res.json();
+        setOwnerFees(Number(data?.fee_btc_total || 0));
+      }
+    } catch (err) {
+      console.error('Failed to fetch owner fees:', err);
     }
   }, []);
 
@@ -61,7 +120,6 @@ function App() {
   }, []);
 
   useEffect(() => {
-    // Connect to socket.io backend
     const socket = io(BACKEND_URL, {
       transports: ['websocket', 'polling'],
       reconnection: true,
@@ -72,31 +130,24 @@ function App() {
       pingInterval: 10000,
       pingTimeout: 5000,
     });
+
     socketRef.current = socket;
 
     socket.on('connect', () => {
-      console.log('Connected to backend via WebSocket');
       setBackendStatus('connected');
-      // Don't spam event log with connection messages
     });
 
-    socket.on('connect_error', (error) => {
-      console.warn('WebSocket connection error:', error.message);
-    });
+    socket.on('connect_error', () => {});
 
-    socket.on('disconnect', (reason) => {
-      console.log('Disconnected from backend:', reason);
+    socket.on('disconnect', () => {
       setBackendStatus('disconnected');
-      // Don't log disconnect spam - only log on user interaction
     });
 
-    // Backend emits 'initial-state' on connect
     socket.on('initial-state', (data) => {
       if (data.miners) setMiners(data.miners);
       if (data.threshold !== undefined) setCurrentThreshold(data.threshold);
     });
 
-    // Backend emits 'miner-update' when a single miner reports
     socket.on('miner-update', (data) => {
       setMiners((prev) => {
         const idx = prev.findIndex((m) => m.miner_id === data.miner_id);
@@ -109,7 +160,6 @@ function App() {
       });
     });
 
-    // Backend emits 'threshold-updated'
     socket.on('threshold-updated', (data) => {
       if (data && data.threshold !== undefined) {
         setCurrentThreshold(data.threshold);
@@ -117,50 +167,67 @@ function App() {
       }
     });
 
-    // Backend emits 'deposit' when BTC enters the exchange
     socket.on('deposit', (data) => {
       fetchAccounts();
       if (data) {
         const amount = data.amount || '?';
         const miner = data.miner_id?.replace('miner-', 'Miner ') || 'Unknown';
-        const threshold = data.threshold || '?';
-        addLog(`✓ ${miner} reached threshold (${threshold} BTC) → Deposited ${amount} BTC`, 'success');
+        addLog(`Deposit verified: ${miner} -> ${amount} BTC`, 'success');
       }
     });
 
-    // Backend emits 'mining-started' when miners start
     socket.on('mining-started', (data) => {
-      if (data && data.miners_started) {
-        addLog(`✓ ${data.miners_started} miner(s) started mining`, 'success');
-      }
+      addLog(`Started mining on ${data?.miners_started || 0} miner(s)`, 'success');
     });
 
-    // Backend emits 'mining-stopped' when miners stop
     socket.on('mining-stopped', (data) => {
-      if (data && data.miners_stopped) {
-        addLog(`✓ ${data.miners_stopped} miner(s) stopped mining`, 'warning');
-      }
+      addLog(`Stopped mining on ${data?.miners_stopped || 0} miner(s)`, 'warning');
     });
 
-    // Don't spam logs on every reconnection - let Socket.IO handle it silently
+    socket.on('orders-updated', () => {
+      fetchAccounts();
+      fetchOrders();
+      fetchTrades();
+      fetchOwnerFees();
+    });
 
-    // Fetch initial data
+    socket.on('trade-executed', (trade) => {
+      addLog(
+        `Trade executed: buy#${trade.buy_order_id} sell#${trade.sell_order_id} ${formatBtc(trade.btc_amount_gross)} BTC @ $${Number(trade.price).toFixed(2)}`,
+        'success'
+      );
+      fetchAccounts();
+      fetchOrders();
+      fetchTrades();
+      fetchOwnerFees();
+    });
+
     fetch(`${BACKEND_URL}/api/miners`).then(r => r.json()).then(data => setMiners(Array.isArray(data) ? data : [])).catch(() => {});
-    fetchAccounts();
-    fetchSystemStatus();
-    fetch(`${BACKEND_URL}/api/threshold`).then(r => r.json()).then(data => { if (data.threshold !== undefined) setCurrentThreshold(data.threshold); }).catch(() => {});
+    fetch(`${BACKEND_URL}/api/threshold`).then(r => r.json()).then(data => {
+      if (data.threshold !== undefined) setCurrentThreshold(data.threshold);
+    }).catch(() => {});
 
-    // Poll system status every 5s for real-time updates
+    fetchSystemStatus();
+    fetchAccounts();
+    fetchOrders();
+    fetchTrades();
+    fetchOwnerFees();
+
     const systemInterval = setInterval(fetchSystemStatus, 5000);
-    // Poll accounts every 5s for real-time updates
     const accountInterval = setInterval(fetchAccounts, 5000);
+    const ordersInterval = setInterval(fetchOrders, 5000);
+    const tradesInterval = setInterval(fetchTrades, 5000);
+    const feesInterval = setInterval(fetchOwnerFees, 5000);
 
     return () => {
       clearInterval(systemInterval);
       clearInterval(accountInterval);
+      clearInterval(ordersInterval);
+      clearInterval(tradesInterval);
+      clearInterval(feesInterval);
       socket.disconnect();
     };
-  }, [fetchAccounts, fetchSystemStatus, addLog]);
+  }, [addLog, fetchAccounts, fetchOrders, fetchOwnerFees, fetchSystemStatus, fetchTrades]);
 
   const handleSetThreshold = async () => {
     const value = parseFloat(threshold);
@@ -179,59 +246,117 @@ function App() {
       if (res.ok) {
         const data = await res.json();
         setCurrentThreshold(data.threshold ?? value);
-        addLog(`✓ Threshold set to ${value} BTC`, 'info');
+        addLog(`Threshold set to ${value} BTC`, 'info');
         setStatus(`Threshold set to ${value} BTC`);
         setThreshold('');
       } else {
         const errData = await res.json().catch(() => ({}));
         setStatus(`Error: ${errData.error || 'Failed to set threshold'}`);
-        addLog(`❌ Failed to set threshold`, 'error');
+        addLog('Failed to set threshold', 'error');
       }
     } catch (err) {
       setStatus(`Error: ${err.message}`);
-      addLog(`❌ Error: ${err.message}`, 'error');
+      addLog(`Error: ${err.message}`, 'error');
     }
   };
 
   const handleStartAllMiners = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/start`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
+      const res = await fetch(`${BACKEND_URL}/api/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
       const data = await res.json();
-      if (res.ok) {
-        addLog(`✓ Started mining on ${data.miners_started || 0} miner(s)`, 'success');
-      } else {
-        addLog(`⚠ ${data.error || 'Failed to start mining'}`, 'warning');
+      if (!res.ok) {
+        addLog(data.error || 'Failed to start mining', 'warning');
       }
-    } catch (err) {
-      console.error('Failed to start miners:', err);
-      addLog('❌ Error: Could not start mining', 'error');
+    } catch {
+      addLog('Could not start mining', 'error');
     }
   };
 
   const handleStopAllMiners = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/stop`, {
+      const res = await fetch(`${BACKEND_URL}/api/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      const data = await res.json();
+      if (!res.ok) {
+        addLog(data.error || 'Failed to stop mining', 'warning');
+      }
+    } catch {
+      addLog('Could not stop mining', 'error');
+    }
+  };
+
+  const handleCreateOrder = async () => {
+    const price = Number(orderPrice);
+    const amount = Number(orderAmount);
+
+    if (!orderClientId) {
+      addLog('Select a client account for the order', 'warning');
+      return;
+    }
+
+    if (!Number.isFinite(price) || price <= 0) {
+      addLog('Price must be positive', 'warning');
+      return;
+    }
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      addLog('Amount must be positive', 'warning');
+      return;
+    }
+
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/orders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clientId: orderClientId,
+          side: orderSide,
+          type: 'limit',
+          price,
+          amount,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        addLog(data.error || 'Order rejected', 'error');
+        return;
+      }
+
+      addLog(`Order #${data.order.id} created (${orderSide.toUpperCase()})`, 'success');
+      if (data.matched) {
+        addLog(`Order #${data.order.id} matched immediately`, 'success');
+      }
+      setOrderPrice('');
+      setOrderAmount('');
+
+      fetchAccounts();
+      fetchOrders();
+      fetchTrades();
+      fetchOwnerFees();
+    } catch (err) {
+      addLog(`Order error: ${err.message}`, 'error');
+    }
+  };
+
+  const handleCancelOrder = async (orderId) => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/orders/${orderId}/cancel`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       });
       const data = await res.json();
-      if (res.ok) {
-        addLog(`✓ Stopped mining on ${data.miners_stopped || 0} miner(s)`, 'warning');
-      } else {
-        addLog(`⚠ ${data.error || 'Failed to stop mining'}`, 'warning');
+      if (!res.ok) {
+        addLog(data.error || `Could not cancel order #${orderId}`, 'error');
+        return;
       }
-    } catch (err) {
-      console.error('Failed to stop miners:', err);
-      addLog('Error: Could not stop mining', 'error');
-    }
-  };
 
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter') {
-      handleSetThreshold();
+      addLog(`Order #${orderId} cancelled`, 'warning');
+      fetchAccounts();
+      fetchOrders();
+      fetchTrades();
+      fetchOwnerFees();
+    } catch (err) {
+      addLog(`Cancel error: ${err.message}`, 'error');
     }
   };
 
@@ -251,35 +376,29 @@ function App() {
   };
 
   const getBackendStatusColor = () => {
-    if (backendStatus === 'connected') return '#3fb950'; // green
-    if (backendStatus === 'connecting') return '#f7931a'; // orange
-    return '#da3633'; // red
+    if (backendStatus === 'connected') return '#3fb950';
+    if (backendStatus === 'connecting') return '#f7931a';
+    return '#da3633';
   };
 
-  const formatBtc = (value) => {
-    if (value === undefined || value === null) return '0.0000';
-    return Number(value).toFixed(4);
-  };
-
-  const formatUsd = (value) => {
-    if (value === undefined || value === null) return '$0.00';
-    return `$${Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  };
+  const traderAccounts = [...accounts]
+    .filter((a) => a.type !== 'owner')
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
 
   const sortedAccounts = [...accounts].sort((a, b) => {
-    const typeOrder = { client: 0, miner: 1 };
-    const typeDiff = (typeOrder[a.type] ?? 2) - (typeOrder[b.type] ?? 2);
+    const typeOrder = { client: 0, miner: 1, owner: 2 };
+    const typeDiff = (typeOrder[a.type] ?? 3) - (typeOrder[b.type] ?? 3);
     if (typeDiff !== 0) return typeDiff;
+
     const numA = parseInt(String(a.id || '').replace('client_', '').replace('miner-', ''), 10) || 0;
     const numB = parseInt(String(b.id || '').replace('client_', '').replace('miner-', ''), 10) || 0;
     return numA - numB;
   });
 
-  const minerDepositAccounts = sortedAccounts.filter(
-    (a) => a.type === 'miner' && (a.btc_balance || 0) > 0
-  );
   const clientAccounts = sortedAccounts.filter((a) => a.type === 'client');
   const minerAccounts = sortedAccounts.filter((a) => a.type === 'miner');
+  const ownerAccount = sortedAccounts.find((a) => a.type === 'owner');
+
   const totalClientPages = Math.max(1, Math.ceil(clientAccounts.length / CLIENTS_PER_PAGE));
   const safeClientPage = Math.min(clientPage, totalClientPages);
   const clientPageStart = (safeClientPage - 1) * CLIENTS_PER_PAGE;
@@ -292,14 +411,13 @@ function App() {
   return (
     <div className="app">
       <header className="header">
-        <h1>Simulated Bitcoin Exchange</h1>
+        <h1>Simulated Bitcoin Exchange - Phase 2</h1>
         <div className="header-status">
           <div className="status-indicator" style={{ backgroundColor: getBackendStatusColor() }}></div>
           <span>{backendStatus === 'connected' ? 'Connected' : backendStatus === 'connecting' ? 'Connecting...' : 'Disconnected'}</span>
         </div>
       </header>
 
-      {/* System Status Panel */}
       <section className="section system-status-section">
         <h2>System Status</h2>
         <div className="status-grid">
@@ -316,19 +434,18 @@ function App() {
             <div className="status-value">{systemStatus.blockchain?.blocks || 0}</div>
           </div>
           <div className="status-card">
-            <div className="status-label">Network</div>
-            <div className="status-value">{systemStatus.blockchain?.chain === 'regtest' ? 'Regtest' : 'Unknown'}</div>
+            <div className="status-label">Owner Fees (BTC)</div>
+            <div className="status-value">{formatBtc(ownerFees)}</div>
           </div>
         </div>
       </section>
 
-      {/* Mining Controls */}
       <section className="section mining-control-section">
-        <h2>Mining Control</h2>
+        <h2>Mining Control (Phase 1 Base)</h2>
         <div className="threshold-controls">
           <input
             type="number"
-            placeholder="BTC threshold (e.g., 50)"
+            placeholder="BTC threshold (e.g., 1)"
             value={threshold}
             onChange={(e) => setThreshold(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSetThreshold()}
@@ -347,7 +464,171 @@ function App() {
         {status && <p className="status-message">{status}</p>}
       </section>
 
-      {/* Miners Table */}
+      <section className="section trading-section">
+        <h2>Trading Panel (Phase 2)</h2>
+        <div className="trading-grid">
+          <div className="order-form">
+            <label>Client / Trader</label>
+            <select value={orderClientId} onChange={(e) => setOrderClientId(e.target.value)}>
+              <option value="">Select account</option>
+              {traderAccounts.map((a) => (
+                <option key={a.id} value={a.id}>{a.id} - {a.name}</option>
+              ))}
+            </select>
+
+            <label>Side</label>
+            <select value={orderSide} onChange={(e) => setOrderSide(e.target.value)}>
+              <option value="buy">Limit Buy</option>
+              <option value="sell">Limit Sell</option>
+            </select>
+
+            <label>Price (USD per BTC)</label>
+            <input type="number" min="0" step="0.01" value={orderPrice} onChange={(e) => setOrderPrice(e.target.value)} placeholder="e.g. 50000" />
+
+            <label>Amount (BTC)</label>
+            <input type="number" min="0" step="0.00000001" value={orderAmount} onChange={(e) => setOrderAmount(e.target.value)} placeholder="e.g. 0.25" />
+
+            <button className="btn-primary" onClick={handleCreateOrder}>Create Limit Order</button>
+          </div>
+
+          <div className="owner-fee-card">
+            <h3>Exchange Owner Fee</h3>
+            <p className="owner-fee-value">{formatBtc(ownerFees)} BTC</p>
+            {ownerAccount && (
+              <p className="owner-meta">
+                Account: {ownerAccount.id} | Available BTC: {formatBtc(ownerAccount.btc_available)}
+              </p>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section className="section orders-section">
+        <h2>Open Orders ({openOrders.length})</h2>
+        <div className="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Client</th>
+                <th>Side</th>
+                <th>Type</th>
+                <th>Price</th>
+                <th>Amount BTC</th>
+                <th>Reserved USD</th>
+                <th>Reserved BTC</th>
+                <th>Created</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {openOrders.length === 0 ? (
+                <tr><td colSpan="10" className="empty-row">No open orders.</td></tr>
+              ) : (
+                openOrders.map((order) => (
+                  <tr key={order.id}>
+                    <td>{order.id}</td>
+                    <td>{order.client_id}</td>
+                    <td>{order.side.toUpperCase()}</td>
+                    <td>{order.type}</td>
+                    <td>{formatUsd(order.price)}</td>
+                    <td>{formatBtc(order.amount)}</td>
+                    <td>{formatUsd(order.reserved_usd)}</td>
+                    <td>{formatBtc(order.reserved_btc)}</td>
+                    <td>{formatDate(order.created_at)}</td>
+                    <td>
+                      <button className="btn-inline-cancel" onClick={() => handleCancelOrder(order.id)}>Cancel</button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="section trades-section">
+        <h2>Completed Trades ({trades.length})</h2>
+        <div className="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Buy Order</th>
+                <th>Sell Order</th>
+                <th>Buyer</th>
+                <th>Seller</th>
+                <th>Price</th>
+                <th>Gross BTC</th>
+                <th>Owner Fee BTC</th>
+                <th>Buyer Net BTC</th>
+                <th>USD Amount</th>
+                <th>Time</th>
+              </tr>
+            </thead>
+            <tbody>
+              {trades.length === 0 ? (
+                <tr><td colSpan="11" className="empty-row">No completed trades yet.</td></tr>
+              ) : (
+                trades.map((trade) => (
+                  <tr key={trade.id}>
+                    <td>{trade.id}</td>
+                    <td>{trade.buy_order_id}</td>
+                    <td>{trade.sell_order_id}</td>
+                    <td>{trade.buyer_id}</td>
+                    <td>{trade.seller_id}</td>
+                    <td>{formatUsd(trade.price)}</td>
+                    <td>{formatBtc(trade.btc_amount_gross)}</td>
+                    <td>{formatBtc(trade.btc_fee_owner)}</td>
+                    <td>{formatBtc(trade.btc_amount_net_to_buyer)}</td>
+                    <td>{formatUsd(trade.usd_amount)}</td>
+                    <td>{formatDate(trade.created_at)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="section completed-orders-section">
+        <h2>Completed / Cancelled Orders ({completedOrders.length})</h2>
+        <div className="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Client</th>
+                <th>Side</th>
+                <th>Price</th>
+                <th>Amount BTC</th>
+                <th>Status</th>
+                <th>Created</th>
+                <th>Closed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {completedOrders.length === 0 ? (
+                <tr><td colSpan="8" className="empty-row">No completed or cancelled orders yet.</td></tr>
+              ) : (
+                completedOrders.map((order) => (
+                  <tr key={order.id}>
+                    <td>{order.id}</td>
+                    <td>{order.client_id}</td>
+                    <td>{order.side.toUpperCase()}</td>
+                    <td>{formatUsd(order.price)}</td>
+                    <td>{formatBtc(order.amount)}</td>
+                    <td>{order.status}</td>
+                    <td>{formatDate(order.created_at)}</td>
+                    <td>{formatDate(order.closed_at)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <section className="section miners-section">
         <h2>Miners ({miners.length})</h2>
         <div className="table-container">
@@ -359,21 +640,19 @@ function App() {
                 <th>Blocks Mined</th>
                 <th>BTC Gained (Total)</th>
                 <th>BTC Immature</th>
-                <th>BTC Available (Spendable)</th>
+                <th>BTC Available</th>
                 <th>Status</th>
               </tr>
             </thead>
             <tbody>
               {miners.length === 0 ? (
                 <tr>
-                  <td colSpan="7" className="empty-row">
-                    No miner data available. Waiting for updates...
-                  </td>
+                  <td colSpan="7" className="empty-row">No miner data available.</td>
                 </tr>
               ) : (
                 [...miners].sort((a, b) => {
-                  const numA = parseInt(a.miner_id?.replace('miner-', '') || 0);
-                  const numB = parseInt(b.miner_id?.replace('miner-', '') || 0);
+                  const numA = parseInt(a.miner_id?.replace('miner-', '') || 0, 10);
+                  const numB = parseInt(b.miner_id?.replace('miner-', '') || 0, 10);
                   return numA - numB;
                 }).map((miner, idx) => {
                   const minerId = miner.miner_id || miner.id || `miner-${idx + 1}`;
@@ -382,19 +661,13 @@ function App() {
                   const statusIndicator = getStatusIndicator(miner);
                   return (
                     <tr key={minerId} className={`miner-row status-${statusIndicator}`}>
-                      <td className="indicator-cell">
-                        <div className={`status-dot ${statusIndicator}`}></div>
-                      </td>
+                      <td className="indicator-cell"><div className={`status-dot ${statusIndicator}`}></div></td>
                       <td>{num}</td>
                       <td>{miner.blocks_mined ?? 0}</td>
                       <td>{formatBtc(miner.btc_gained)}</td>
                       <td><span className="btc-immature">{formatBtc(miner.btc_immature)}</span></td>
                       <td>{formatBtc(miner.btc_available)}</td>
-                      <td>
-                        <span className={`status-badge ${getStatusClass(statusText)}`}>
-                          {statusText}
-                        </span>
-                      </td>
+                      <td><span className={`status-badge ${getStatusClass(statusText)}`}>{statusText}</span></td>
                     </tr>
                   );
                 })
@@ -404,7 +677,23 @@ function App() {
         </div>
       </section>
 
-      {/* Logs Panel */}
+      <section className="section accounts-section">
+        <div className="section-heading-row">
+          <h2>Client Accounts ({clientAccounts.length})</h2>
+          <div className="pagination-controls">
+            <button onClick={() => setClientPage((page) => Math.max(1, page - 1))} disabled={safeClientPage === 1}>Previous</button>
+            <span>Page {safeClientPage} of {totalClientPages}</span>
+            <button onClick={() => setClientPage((page) => Math.min(totalClientPages, page + 1))} disabled={safeClientPage === totalClientPages}>Next</button>
+          </div>
+        </div>
+        <AccountsTable rows={visibleClientAccounts} />
+      </section>
+
+      <section className="section accounts-section">
+        <h2>Miner Exchange Accounts ({minerAccounts.length})</h2>
+        <AccountsTable rows={minerAccounts} />
+      </section>
+
       <section className="section logs-section">
         <h2>Event Log ({logs.length})</h2>
         <div className="logs-container">
@@ -420,140 +709,78 @@ function App() {
           )}
         </div>
       </section>
-
-      {/* Miner Deposits */}
-      <section className="section accounts-section">
-        <h2>Miner Deposits ({minerDepositAccounts.length})</h2>
-        <div className="table-container">
-          <table>
-            <thead>
-              <tr>
-                <th>Miner</th>
-                <th>BTC Received</th>
-                <th>USD Value</th>
-              </tr>
-            </thead>
-            <tbody>
-              {minerDepositAccounts.length === 0 ? (
-                <tr>
-                  <td colSpan="3" className="empty-row">
-                    No deposits yet. Mine blocks and reach threshold to see deposits here.
-                  </td>
-                </tr>
-              ) : (
-                minerDepositAccounts.map((account, idx) => (
-                  <tr key={account.id || account.name || idx}>
-                    <td>{account.name || `Account ${idx + 1}`}</td>
-                    <td>{formatBtc(account.btc_balance)}</td>
-                    <td>{formatUsd(account.usd_balance)}</td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      {/* Client Accounts */}
-      <section className="section accounts-section">
-        <div className="section-heading-row">
-          <h2>Client Accounts ({clientAccounts.length})</h2>
-          <div className="pagination-controls">
-            <button
-              onClick={() => setClientPage((page) => Math.max(1, page - 1))}
-              disabled={safeClientPage === 1}
-            >
-              Previous
-            </button>
-            <span>Page {safeClientPage} of {totalClientPages}</span>
-            <button
-              onClick={() => setClientPage((page) => Math.min(totalClientPages, page + 1))}
-              disabled={safeClientPage === totalClientPages}
-            >
-              Next
-            </button>
-          </div>
-        </div>
-        <div className="table-container">
-          <table>
-            <thead>
-              <tr>
-                <th>Account ID</th>
-                <th>Name</th>
-                <th>Type</th>
-                <th>BTC Balance</th>
-                <th>USD Balance</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visibleClientAccounts.length === 0 ? (
-                <tr>
-                  <td colSpan="5" className="empty-row">
-                    No client accounts loaded yet.
-                  </td>
-                </tr>
-              ) : (
-                visibleClientAccounts.map((account) => (
-                  <tr key={account.id}>
-                    <td>{account.id}</td>
-                    <td>{account.name}</td>
-                    <td>
-                      <span className={`type-badge type-${account.type || 'unknown'}`}>
-                        {account.type || 'unknown'}
-                      </span>
-                    </td>
-                    <td>{formatBtc(account.btc_balance)}</td>
-                    <td>{formatUsd(account.usd_balance)}</td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      {/* Miner Accounts */}
-      <section className="section accounts-section">
-        <h2>Miner Exchange Accounts ({minerAccounts.length})</h2>
-        <div className="table-container">
-          <table>
-            <thead>
-              <tr>
-                <th>Account ID</th>
-                <th>Name</th>
-                <th>Type</th>
-                <th>BTC Balance</th>
-                <th>USD Balance</th>
-              </tr>
-            </thead>
-            <tbody>
-              {minerAccounts.length === 0 ? (
-                <tr>
-                  <td colSpan="5" className="empty-row">
-                    No miner exchange accounts yet.
-                  </td>
-                </tr>
-              ) : (
-                minerAccounts.map((account) => (
-                  <tr key={account.id}>
-                    <td>{account.id}</td>
-                    <td>{account.name}</td>
-                    <td>
-                      <span className={`type-badge type-${account.type || 'unknown'}`}>
-                        {account.type || 'unknown'}
-                      </span>
-                    </td>
-                    <td>{formatBtc(account.btc_balance)}</td>
-                    <td>{formatUsd(account.usd_balance)}</td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
     </div>
   );
+}
+
+function AccountsTable({ rows }) {
+  return (
+    <div className="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>Account ID</th>
+            <th>Name</th>
+            <th>Type</th>
+            <th>BTC Available</th>
+            <th>BTC Reserved</th>
+            <th>BTC Total</th>
+            <th>USD Available</th>
+            <th>USD Reserved</th>
+            <th>USD Total</th>
+            <th>Open Orders</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr>
+              <td colSpan="10" className="empty-row">No accounts loaded.</td>
+            </tr>
+          ) : (
+            rows.map((account) => (
+              <tr key={account.id}>
+                <td>{account.id}</td>
+                <td>{account.name}</td>
+                <td>
+                  <span className={`type-badge type-${account.type || 'unknown'}`}>
+                    {account.type || 'unknown'}
+                  </span>
+                </td>
+                <td>{formatBtc(account.btc_available)}</td>
+                <td>{formatBtc(account.btc_reserved)}</td>
+                <td>{formatBtc(account.btc_balance)}</td>
+                <td>{formatUsd(account.usd_available)}</td>
+                <td>{formatUsd(account.usd_reserved)}</td>
+                <td>{formatUsd(account.usd_balance)}</td>
+                <td>
+                  <span className={`open-orders-badge ${account.has_open_orders ? 'yes' : 'no'}`}>
+                    {account.open_orders_count || 0}
+                  </span>
+                </td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function formatBtc(value) {
+  if (value === undefined || value === null) return '0.00000000';
+  return Number(value).toFixed(8);
+}
+
+function formatUsd(value) {
+  if (value === undefined || value === null) return '$0.00';
+  return `$${Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function formatDate(iso) {
+  if (!iso) return '-';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return String(iso);
+  return date.toLocaleString();
 }
 
 export default App;
