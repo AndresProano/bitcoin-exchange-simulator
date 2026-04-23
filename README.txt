@@ -266,7 +266,12 @@ Main additions in UI:
 Phase 1 UI remains:
 - threshold controls
 - start/stop mining controls
-- miners table
+- miners table with separated metrics:
+  - BTC mined accumulated
+  - BTC matured accumulated
+  - BTC sent to exchange accumulated
+  - BTC sent to treasury/fees accumulated
+  - BTC matured remaining (current spendable wallet amount)
 - event log
 
 ================================================================================
@@ -275,7 +280,7 @@ DOCKER COMPOSE RUN
 ------------------
 From repo root:
 
-  docker compose pull
+  docker compose build
   docker compose up -d
 
 Open frontend:
@@ -298,15 +303,28 @@ Full reset (including DB data):
 
   docker compose down -v
 
+Local-development behavior (current default):
+- backend, frontend, and all 10 miners are built from local source.
+- `pull_policy: never` is set for those app services in `docker-compose.yml`.
+- This avoids accidental priority of remote app images during local validation.
+
 ================================================================================
 
 DOCKER HUB / MULTI-ARCH (AMD + ARM)
 ------------------------------------
-Current compose references published app images:
+Published app images:
 - byandyx/btc-backend:latest
 - byandyx/btc-frontend:latest
 - byandyx/btc-miner:latest
 - bitcoin/bitcoin:29.3
+
+To force Docker Hub mode again (without editing compose files), use:
+
+  docker compose -f docker-compose.yml -f docker-compose.hub.yml pull
+  docker compose -f docker-compose.yml -f docker-compose.hub.yml up -d
+
+`docker-compose.hub.yml` sets `pull_policy: always` for backend/frontend/miners.
+This is the clean reversible path between local build mode and Docker Hub mode.
 
 Build and publish your own multi-arch images:
 

@@ -470,6 +470,8 @@ function prepareStatements() {
   `);
 
   stmts.getAllMiners = db.prepare('SELECT * FROM miners ORDER BY miner_id');
+  stmts.getMinerById = db.prepare('SELECT * FROM miners WHERE miner_id = ?');
+  stmts.getMinerDepositTotal = db.prepare('SELECT ROUND(COALESCE(SUM(amount), 0), 8) AS total FROM deposits WHERE miner_id = ?');
 
   stmts.getAllAccounts = db.prepare(`
     SELECT
@@ -648,6 +650,53 @@ function saveAccount(account) {
     usd_balance: normalized.usd_balance,
   });
   return normalized;
+}
+
+function getCurrentThreshold() {
+  const thresholdRow = stmts.getSetting.get('threshold');
+  return thresholdRow ? Number(thresholdRow.value || 0) : 0;
+}
+
+function normalizeMinerSnapshot(miner, threshold = getCurrentThreshold()) {
+  const minedTotal = roundBTC(miner.btc_gained || 0);
+  const immatureNow = roundBTC(miner.btc_immature || 0);
+  const matureAvailableNow = roundBTC(miner.btc_available || 0);
+  const maturedTotal = roundBTC(Math.max(0, minedTotal - immatureNow));
+
+  const transferRow = stmts.getMinerDepositTotal.get(miner.miner_id);
+  const transferredExchangeTotal = roundBTC(transferRow ? transferRow.total : 0);
+
+  // Matured BTC can leave the miner wallet in two directions:
+  // 1) Exchange deposit address (counted in deposits table)
+  // 2) Treasury / network fees (tracked as "spent elsewhere")
+  const maturedSpentTotal = roundBTC(Math.max(0, maturedTotal - matureAvailableNow));
+  const spentElsewhereTotal = roundBTC(Math.max(0, maturedSpentTotal - transferredExchangeTotal));
+  const maturedRemaining = roundBTC(Math.max(0, maturedTotal - transferredExchangeTotal - spentElsewhereTotal));
+
+  return {
+    ...miner,
+    btc_gained: minedTotal,
+    btc_immature: immatureNow,
+    btc_available: matureAvailableNow,
+    btc_mined_total: minedTotal,
+    btc_matured_total: maturedTotal,
+    btc_transferred_exchange_total: transferredExchangeTotal,
+    btc_spent_elsewhere_total: spentElsewhereTotal,
+    btc_matured_remaining: maturedRemaining,
+    threshold: roundBTC(threshold),
+    threshold_met: threshold > 0 && matureAvailableNow + BTC_EPSILON >= threshold ? 1 : 0,
+  };
+}
+
+function getMinerSnapshots() {
+  const threshold = getCurrentThreshold();
+  return stmts.getAllMiners.all().map((miner) => normalizeMinerSnapshot(miner, threshold));
+}
+
+function getMinerSnapshot(minerId) {
+  const miner = stmts.getMinerById.get(minerId);
+  if (!miner) return null;
+  return normalizeMinerSnapshot(miner, getCurrentThreshold());
 }
 
 function getTradingEligibleAccountOrThrow(clientId) {
@@ -1108,8 +1157,7 @@ app.get('/api/system-status', async (_req, res) => {
 });
 
 app.get('/api/threshold', (_req, res) => {
-  const row = stmts.getSetting.get('threshold');
-  res.json({ threshold: row ? parseFloat(row.value) : 0 });
+  res.json({ threshold: getCurrentThreshold() });
 });
 
 app.post('/api/threshold', async (req, res) => {
@@ -1157,6 +1205,7 @@ app.post('/api/threshold', async (req, res) => {
 
   await Promise.all(promises);
   io.emit('threshold-updated', { threshold });
+  io.emit('miners-updated', getMinerSnapshots());
 
   res.json({ threshold, miners: results });
 });
@@ -1275,30 +1324,32 @@ app.post('/api/miner-update', (req, res) => {
 
   updateMinerStatus(miner_id, true);
 
-  const thresholdRow = stmts.getSetting.get('threshold');
-  const threshold = thresholdRow ? parseFloat(thresholdRow.value) : 0;
-  const threshold_met = (btc_mature || 0) >= threshold && threshold > 0 ? 1 : 0;
+  const threshold = getCurrentThreshold();
+  const existing = stmts.getMinerById.get(miner_id);
+  const currentMature = roundBTC(btc_available || btc_mature || 0);
+  const threshold_met = threshold > 0 && currentMature + BTC_EPSILON >= threshold ? 1 : 0;
 
   const data = {
     miner_id,
-    blocks_mined: Math.floor(blocks_mined || 0),
-    btc_gained: btc_gained || 0,
-    btc_mature: btc_mature || 0,
-    btc_available: btc_available || 0,
-    btc_immature: btc_immature || 0,
+    // Keep these counters monotonic to avoid regressions after miner restarts.
+    blocks_mined: Math.max(Math.floor(blocks_mined || 0), Math.floor(existing?.blocks_mined || 0)),
+    btc_gained: Math.max(roundBTC(btc_gained || 0), roundBTC(existing?.btc_gained || 0)),
+    btc_mature: currentMature,
+    btc_available: currentMature,
+    btc_immature: roundBTC(btc_immature || 0),
     status: 'mining',
     threshold_met,
   };
 
   stmts.upsertMiner.run(data);
-  io.emit('miner-update', data);
+  const snapshot = getMinerSnapshot(miner_id);
+  io.emit('miner-update', snapshot || data);
 
-  res.json({ status: 'ok', ...data });
+  res.json({ status: 'ok', ...(snapshot || data) });
 });
 
 app.get('/api/miners', (_req, res) => {
-  const miners = stmts.getAllMiners.all();
-  res.json(miners);
+  res.json(getMinerSnapshots());
 });
 
 app.get('/api/accounts', (_req, res) => {
@@ -1505,6 +1556,10 @@ app.post('/api/exchange/deposit', async (req, res) => {
     confirmations: verification.confirmations,
     account: updated,
   });
+  const snapshot = getMinerSnapshot(miner_id);
+  if (snapshot) {
+    io.emit('miner-update', snapshot);
+  }
 
   res.json({ status: 'ok', account: updated, txid, confirmations: verification.confirmations });
 });
@@ -1523,10 +1578,10 @@ app.get('/api/exchange/addresses', (_req, res) => {
 // Socket.IO connection handling
 // ---------------------------------------------------------------------------
 io.on('connection', (socket) => {
-  const miners = stmts.getAllMiners.all();
+  const miners = getMinerSnapshots();
   socket.emit('initial-state', {
     miners,
-    threshold: parseFloat((stmts.getSetting.get('threshold') || { value: '0' }).value),
+    threshold: getCurrentThreshold(),
   });
 
   socket.on('disconnect', () => {});

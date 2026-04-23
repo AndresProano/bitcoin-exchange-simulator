@@ -40,6 +40,18 @@ function App() {
     }, ...prev].slice(0, MAX_LOGS));
   }, []);
 
+  const fetchMiners = useCallback(async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/miners`);
+      if (res.ok) {
+        const data = await res.json();
+        setMiners(Array.isArray(data) ? data : []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch miners:', err);
+    }
+  }, []);
+
   const fetchAccounts = useCallback(async () => {
     try {
       const res = await fetch(`${BACKEND_URL}/api/accounts`);
@@ -148,7 +160,16 @@ function App() {
       if (data.threshold !== undefined) setCurrentThreshold(data.threshold);
     });
 
+    socket.on('miners-updated', (data) => {
+      if (Array.isArray(data)) {
+        setMiners(data);
+      } else {
+        fetchMiners();
+      }
+    });
+
     socket.on('miner-update', (data) => {
+      if (!data || !data.miner_id) return;
       setMiners((prev) => {
         const idx = prev.findIndex((m) => m.miner_id === data.miner_id);
         if (idx >= 0) {
@@ -164,11 +185,13 @@ function App() {
       if (data && data.threshold !== undefined) {
         setCurrentThreshold(data.threshold);
         addLog(`Threshold updated to ${data.threshold} BTC`, 'info');
+        fetchMiners();
       }
     });
 
     socket.on('deposit', (data) => {
       fetchAccounts();
+      fetchMiners();
       if (data) {
         const amount = data.amount || '?';
         const miner = data.miner_id?.replace('miner-', 'Miner ') || 'Unknown';
@@ -178,10 +201,12 @@ function App() {
 
     socket.on('mining-started', (data) => {
       addLog(`Started mining on ${data?.miners_started || 0} miner(s)`, 'success');
+      fetchMiners();
     });
 
     socket.on('mining-stopped', (data) => {
       addLog(`Stopped mining on ${data?.miners_stopped || 0} miner(s)`, 'warning');
+      fetchMiners();
     });
 
     socket.on('orders-updated', () => {
@@ -202,7 +227,7 @@ function App() {
       fetchOwnerFees();
     });
 
-    fetch(`${BACKEND_URL}/api/miners`).then(r => r.json()).then(data => setMiners(Array.isArray(data) ? data : [])).catch(() => {});
+    fetchMiners();
     fetch(`${BACKEND_URL}/api/threshold`).then(r => r.json()).then(data => {
       if (data.threshold !== undefined) setCurrentThreshold(data.threshold);
     }).catch(() => {});
@@ -227,7 +252,7 @@ function App() {
       clearInterval(feesInterval);
       socket.disconnect();
     };
-  }, [addLog, fetchAccounts, fetchOrders, fetchOwnerFees, fetchSystemStatus, fetchTrades]);
+  }, [addLog, fetchAccounts, fetchMiners, fetchOrders, fetchOwnerFees, fetchSystemStatus, fetchTrades]);
 
   const handleSetThreshold = async () => {
     const value = parseFloat(threshold);
@@ -249,6 +274,7 @@ function App() {
         addLog(`Threshold set to ${value} BTC`, 'info');
         setStatus(`Threshold set to ${value} BTC`);
         setThreshold('');
+        fetchMiners();
       } else {
         const errData = await res.json().catch(() => ({}));
         setStatus(`Error: ${errData.error || 'Failed to set threshold'}`);
@@ -266,6 +292,8 @@ function App() {
       const data = await res.json();
       if (!res.ok) {
         addLog(data.error || 'Failed to start mining', 'warning');
+      } else {
+        fetchMiners();
       }
     } catch {
       addLog('Could not start mining', 'error');
@@ -278,6 +306,8 @@ function App() {
       const data = await res.json();
       if (!res.ok) {
         addLog(data.error || 'Failed to stop mining', 'warning');
+      } else {
+        fetchMiners();
       }
     } catch {
       addLog('Could not stop mining', 'error');
@@ -363,10 +393,17 @@ function App() {
   const getStatusClass = (minerStatus) => {
     if (!minerStatus) return '';
     const s = minerStatus.toLowerCase();
+    if (s.includes('ready')) return 'status-threshold';
     if (s.includes('mining')) return 'status-mining';
     if (s.includes('stopped')) return 'status-stopped';
     if (s.includes('threshold')) return 'status-threshold';
     return '';
+  };
+
+  const getMinerStatusText = (miner) => {
+    if (miner.threshold_met) return 'ready to transfer';
+    if (miner.status === 'mining') return 'mining';
+    return miner.status || 'idle';
   };
 
   const getStatusIndicator = (miner) => {
@@ -637,17 +674,21 @@ function App() {
               <tr>
                 <th></th>
                 <th>Miner #</th>
-                <th>Blocks Mined</th>
-                <th>BTC Gained (Total)</th>
+                <th>Blocks</th>
+                <th>BTC Mined (Accum.)</th>
+                <th>BTC Matured (Accum.)</th>
+                <th>BTC Sent to Exchange (Accum.)</th>
+                <th>BTC Sent to Treasury/Fee (Accum.)</th>
+                <th>BTC Matured Remaining</th>
                 <th>BTC Immature</th>
-                <th>BTC Available</th>
+                <th>Threshold</th>
                 <th>Status</th>
               </tr>
             </thead>
             <tbody>
               {miners.length === 0 ? (
                 <tr>
-                  <td colSpan="7" className="empty-row">No miner data available.</td>
+                  <td colSpan="11" className="empty-row">No miner data available.</td>
                 </tr>
               ) : (
                 [...miners].sort((a, b) => {
@@ -657,16 +698,20 @@ function App() {
                 }).map((miner, idx) => {
                   const minerId = miner.miner_id || miner.id || `miner-${idx + 1}`;
                   const num = minerId.replace('miner-', '').replace('miner_', '');
-                  const statusText = miner.threshold_met ? 'threshold met' : (miner.status || 'idle');
+                  const statusText = getMinerStatusText(miner);
                   const statusIndicator = getStatusIndicator(miner);
                   return (
                     <tr key={minerId} className={`miner-row status-${statusIndicator}`}>
                       <td className="indicator-cell"><div className={`status-dot ${statusIndicator}`}></div></td>
                       <td>{num}</td>
                       <td>{miner.blocks_mined ?? 0}</td>
-                      <td>{formatBtc(miner.btc_gained)}</td>
+                      <td><span className="btc-mined">{formatBtc(miner.btc_mined_total ?? miner.btc_gained)}</span></td>
+                      <td>{formatBtc(miner.btc_matured_total)}</td>
+                      <td><span className="btc-transfer">{formatBtc(miner.btc_transferred_exchange_total)}</span></td>
+                      <td>{formatBtc(miner.btc_spent_elsewhere_total)}</td>
+                      <td><span className="btc-remaining">{formatBtc(miner.btc_matured_remaining ?? miner.btc_available)}</span></td>
                       <td><span className="btc-immature">{formatBtc(miner.btc_immature)}</span></td>
-                      <td>{formatBtc(miner.btc_available)}</td>
+                      <td>{formatBtc(miner.threshold ?? currentThreshold ?? 0)}</td>
                       <td><span className={`status-badge ${getStatusClass(statusText)}`}>{statusText}</span></td>
                     </tr>
                   );
@@ -675,6 +720,9 @@ function App() {
             </tbody>
           </table>
         </div>
+        <p className="miner-balance-note">
+          Equation: <strong>Matured Accumulated = Sent to Exchange + Sent to Treasury/Fee + Matured Remaining</strong>.
+        </p>
       </section>
 
       <section className="section accounts-section">

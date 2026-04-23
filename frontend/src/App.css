@@ -341,6 +341,31 @@ tbody tr:hover {
   font-style: italic;
 }
 
+.btc-mined {
+  color: #58a6ff;
+  font-weight: 600;
+}
+
+.btc-transfer {
+  color: #f7931a;
+  font-weight: 600;
+}
+
+.btc-remaining {
+  color: #3fb950;
+  font-weight: 600;
+}
+
+.miner-balance-note {
+  margin-top: 10px;
+  font-size: 0.82rem;
+  color: #8b949e;
+}
+
+.miner-balance-note strong {
+  color: #c9d1d9;
+}
+
 /* Logs Section */
 .logs-section {
   margin-top: 24px;
