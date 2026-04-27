@@ -20,20 +20,6 @@ Main additions in this phase:
 
 ================================================================================
 
-QUICK START (NO BUILD, FROM DOCKER HUB)
----------------------------------------
-If you only want to run the project for grading, run these two commands from
-the repo root and open http://localhost:3000:
-
-  docker compose -f docker-compose.yml -f docker-compose.hub.yml pull
-  docker compose -f docker-compose.yml -f docker-compose.hub.yml up -d
-
-You MUST pass BOTH `-f` files. Running plain `docker compose up` will try
-to use local images (or build from source) — see the "HOW TO RUN" section
-further down for the full explanation and the local-build alternative.
-
-================================================================================
-
 TEAM MEMBERS
 ------------
 1. Andres Proano
