@@ -1463,6 +1463,12 @@ app.get('/api/orders/completed', (_req, res) => {
   res.json(orders);
 });
 
+app.delete('/api/orders/completed', (_req, res) => {
+  const result = db.prepare(`DELETE FROM orders WHERE status IN ('completed', 'cancelled')`).run();
+  io.emit('orders-updated', { timestamp: nowIso() });
+  res.json({ status: 'ok', deleted: result.changes });
+});
+
 app.post('/api/orders/:id/cancel', (req, res) => {
   const orderId = Number(req.params.id);
   if (!Number.isInteger(orderId) || orderId <= 0) {

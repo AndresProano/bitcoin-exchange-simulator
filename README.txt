@@ -192,6 +192,8 @@ VALIDATIONS IMPLEMENTED
 - Reject amount <= 0.
 - Prevent double use of funds by moving funds to reserved balances on open order.
 - Reject owner account as trader.
+- Miners (type='miner') are eligible traders once they have deposited BTC
+  to the exchange wallet (they can both BUY and SELL).
 
 ================================================================================
 
@@ -230,11 +232,13 @@ Accounts:
 - GET  /api/accounts/:id
 
 Orders:
-- POST /api/orders
+- POST   /api/orders
   body: { clientId, side, type, price, amount }
-- GET  /api/orders/open
-- GET  /api/orders/completed
-- POST /api/orders/:id/cancel
+- GET    /api/orders/open
+- GET    /api/orders/completed
+- DELETE /api/orders/completed
+  Clears the completed/cancelled orders history table (trades are preserved).
+- POST   /api/orders/:id/cancel
 
 Trades / fees:
 - GET  /api/trades
@@ -258,10 +262,12 @@ Main additions in UI:
 - Trading panel (client selector, side, price, amount)
 - Open orders table (with cancel action)
 - Completed trades table
-- Completed/cancelled orders table
+- Completed/cancelled orders table with "Clear History" button
+  (deletes the order history per Phase 2 §8 "viewable until the user
+  deletes it"; trades record is preserved)
 - Detailed account balances (available/reserved BTC/USD)
 - Open-orders indicator per account
-- Owner fee total card
+- Owner fee total card (shows accumulated 2% BTC fee)
 
 Phase 1 UI remains:
 - threshold controls
@@ -312,11 +318,17 @@ Local-development behavior (current default):
 
 DOCKER HUB / MULTI-ARCH (AMD + ARM)
 ------------------------------------
-Published app images:
+Published app images (multi-arch: linux/amd64 + linux/arm64):
 - byandyx/btc-backend:latest
 - byandyx/btc-frontend:latest
 - byandyx/btc-miner:latest
 - bitcoin/bitcoin:29.3
+
+Note on the backend image:
+- backend/Dockerfile installs python3, make and g++ on Alpine so that
+  better-sqlite3 can fall back to a node-gyp source build if the
+  prebuilt binary cannot be downloaded. This makes multi-arch builds
+  reliable on slow networks and on linux/arm64.
 
 To force Docker Hub mode again (without editing compose files), use:
 
@@ -354,6 +366,10 @@ PHASE 2 MANUAL DEMO / CHECKLIST
 8. Verify owner fee increases by 2% of gross BTC trade amount.
 9. Create an order that cannot match and confirm it stays in Open Orders.
 10. Cancel the open order and verify reserved funds are released.
+11. Click "Clear History" in the Completed / Cancelled Orders section to
+    delete the order history (confirms Phase 2 §8 deletion requirement).
+12. Optional: place a SELL order from a miner account to verify miners
+    can also trade once they hold internal BTC.
 
 ================================================================================
 

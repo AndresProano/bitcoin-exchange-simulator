@@ -368,6 +368,24 @@ function App() {
     }
   };
 
+  const handleClearCompletedOrders = async () => {
+    if (completedOrders.length === 0) return;
+    if (!window.confirm(`Delete ${completedOrders.length} completed/cancelled order(s) from history?`)) return;
+
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/orders/completed`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) {
+        addLog(data.error || 'Could not clear completed orders', 'error');
+        return;
+      }
+      addLog(`Cleared ${data.deleted} completed/cancelled order(s)`, 'warning');
+      fetchOrders();
+    } catch (err) {
+      addLog(`Clear error: ${err.message}`, 'error');
+    }
+  };
+
   const handleCancelOrder = async (orderId) => {
     try {
       const res = await fetch(`${BACKEND_URL}/api/orders/${orderId}/cancel`, {
@@ -629,7 +647,16 @@ function App() {
       </section>
 
       <section className="section completed-orders-section">
-        <h2>Completed / Cancelled Orders ({completedOrders.length})</h2>
+        <div className="section-heading-row">
+          <h2>Completed / Cancelled Orders ({completedOrders.length})</h2>
+          <button
+            className="btn-danger"
+            onClick={handleClearCompletedOrders}
+            disabled={completedOrders.length === 0}
+          >
+            Clear History
+          </button>
+        </div>
         <div className="table-container">
           <table>
             <thead>
