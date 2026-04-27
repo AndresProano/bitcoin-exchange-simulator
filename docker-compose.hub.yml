@@ -1,0 +1,36 @@
+services:
+  backend:
+    pull_policy: always
+
+  frontend:
+    pull_policy: always
+
+  miner-1:
+    pull_policy: always
+
+  miner-2:
+    pull_policy: always
+
+  miner-3:
+    pull_policy: always
+
+  miner-4:
+    pull_policy: always
+
+  miner-5:
+    pull_policy: always
+
+  miner-6:
+    pull_policy: always
+
+  miner-7:
+    pull_policy: always
+
+  miner-8:
+    pull_policy: always
+
+  miner-9:
+    pull_policy: always
+
+  miner-10:
+    pull_policy: always

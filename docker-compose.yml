@@ -1,5 +1,10 @@
 x-miner-common: &miner-common
+  # Local-dev default: always use local build for app services.
+  # To force Docker Hub mode, run with: -f docker-compose.yml -f docker-compose.hub.yml
   image: byandyx/btc-miner:latest
+  build:
+    context: ./miner
+  pull_policy: never
   restart: unless-stopped
   depends_on:
     node1:
@@ -62,6 +67,7 @@ services:
     image: byandyx/btc-backend:latest
     build:
       context: ./backend
+    pull_policy: never
     container_name: backend
     ports:
       - "3001:3001"
@@ -70,9 +76,12 @@ services:
       BITCOIN_RPC_PORT: "18443"
       BITCOIN_RPC_USER: bitcoin
       BITCOIN_RPC_PASS: bitcoin
+      DB_PATH: /app/data/exchange.db
     depends_on:
       - node1
       - node2
+    volumes:
+      - backend-data:/app/data
     networks:
       - btcnet
 
@@ -80,6 +89,7 @@ services:
     image: byandyx/btc-frontend:latest
     build:
       context: ./frontend
+    pull_policy: never
     container_name: frontend
     ports:
       - "3000:80"
@@ -90,8 +100,6 @@ services:
 
   miner-1:
     <<: *miner-common
-    build:
-      context: ./miner
     container_name: miner-1
     environment:
       MINER_ID: miner-1
@@ -203,6 +211,7 @@ services:
 volumes:
   node1-data:
   node2-data:
+  backend-data:
 
 networks:
   btcnet:
