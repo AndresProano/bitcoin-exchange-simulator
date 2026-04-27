@@ -1,10 +1,6 @@
 x-miner-common: &miner-common
-  # Local-dev default: always use local build for app services.
-  # To force Docker Hub mode, run with: -f docker-compose.yml -f docker-compose.hub.yml
   image: byandyx/btc-miner:latest
-  build:
-    context: ./miner
-  pull_policy: never
+  pull_policy: always
   restart: unless-stopped
   depends_on:
     node1:
@@ -65,9 +61,7 @@ services:
 
   backend:
     image: byandyx/btc-backend:latest
-    build:
-      context: ./backend
-    pull_policy: never
+    pull_policy: always
     container_name: backend
     ports:
       - "3001:3001"
@@ -87,9 +81,7 @@ services:
 
   frontend:
     image: byandyx/btc-frontend:latest
-    build:
-      context: ./frontend
-    pull_policy: never
+    pull_policy: always
     container_name: frontend
     ports:
       - "3000:80"

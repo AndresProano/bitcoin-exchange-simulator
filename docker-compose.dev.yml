@@ -1,0 +1,45 @@
+x-miner-dev: &miner-dev
+  build:
+    context: ./miner
+  pull_policy: never
+
+services:
+  backend:
+    build:
+      context: ./backend
+    pull_policy: never
+
+  frontend:
+    build:
+      context: ./frontend
+    pull_policy: never
+
+  miner-1:
+    <<: *miner-dev
+
+  miner-2:
+    <<: *miner-dev
+
+  miner-3:
+    <<: *miner-dev
+
+  miner-4:
+    <<: *miner-dev
+
+  miner-5:
+    <<: *miner-dev
+
+  miner-6:
+    <<: *miner-dev
+
+  miner-7:
+    <<: *miner-dev
+
+  miner-8:
+    <<: *miner-dev
+
+  miner-9:
+    <<: *miner-dev
+
+  miner-10:
+    <<: *miner-dev
