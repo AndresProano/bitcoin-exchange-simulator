@@ -18,6 +18,20 @@ internal trading subsystem required in Homework 4:
 
 ================================================================================
 
+QUICK START (NO BUILD, FROM DOCKER HUB)
+---------------------------------------
+If you only want to run the project for grading, run these two commands from
+the repo root and open http://localhost:3000:
+
+  docker compose -f docker-compose.yml -f docker-compose.hub.yml pull
+  docker compose -f docker-compose.yml -f docker-compose.hub.yml up -d
+
+You MUST pass BOTH `-f` files. Running plain `docker compose up` will try
+to use local images (or build from source) — see the "HOW TO RUN" section
+further down for the full explanation and the local-build alternative.
+
+================================================================================
+
 TEAM MEMBERS
 ------------
 1. Andres Proano
@@ -282,8 +296,60 @@ Phase 1 UI remains:
 
 ================================================================================
 
-DOCKER COMPOSE RUN
-------------------
+HOW TO RUN
+==========
+
+There are TWO ways to run this project. Pick ONE.
+
+--------------------------------------------------------------------------------
+OPTION A (RECOMMENDED FOR GRADING) — RUN FROM DOCKER HUB, NO BUILD
+--------------------------------------------------------------------------------
+Use this path if you do NOT want to build anything locally. All app images
+(backend, frontend, miners) are pulled from Docker Hub.
+
+REQUIREMENT: you MUST pass BOTH compose files (-f docker-compose.yml AND
+-f docker-compose.hub.yml). The hub file overrides `pull_policy: never`
+with `pull_policy: always` for the app services, so Docker pulls the
+published images instead of trying to build them.
+
+From repo root:
+
+  # 1. Pull the published images (no build step at all)
+  docker compose -f docker-compose.yml -f docker-compose.hub.yml pull
+
+  # 2. Start the full stack
+  docker compose -f docker-compose.yml -f docker-compose.hub.yml up -d
+
+Open frontend:
+
+  http://localhost:3000
+
+Stop:
+
+  docker compose -f docker-compose.yml -f docker-compose.hub.yml down
+
+Full reset (also wipes SQLite + bitcoin regtest data):
+
+  docker compose -f docker-compose.yml -f docker-compose.hub.yml down -v
+
+IMPORTANT — DO NOT run `docker compose up` (without -f docker-compose.hub.yml)
+on a machine that has never built the images. The default file sets
+`pull_policy: never` for backend/frontend/miners, which means Docker will
+try to use a LOCAL image and, if none exists, fall back to building from
+source. To skip the build, you MUST include docker-compose.hub.yml.
+
+Published images (multi-arch: linux/amd64 + linux/arm64):
+- byandyx/btc-backend:latest
+- byandyx/btc-frontend:latest
+- byandyx/btc-miner:latest
+- bitcoin/bitcoin:29.3   (official, pulled automatically)
+
+--------------------------------------------------------------------------------
+OPTION B — LOCAL BUILD (FOR DEVELOPMENT)
+--------------------------------------------------------------------------------
+Use this only if you are modifying source code and want to rebuild the
+images from this repo.
+
 From repo root:
 
   docker compose build
@@ -293,14 +359,6 @@ Open frontend:
 
   http://localhost:3000
 
-Check status:
-
-  docker compose ps
-  docker compose logs -f backend
-
-Persistence:
-- backend SQLite is persisted via volume `backend-data` mounted at /app/data.
-
 Stop:
 
   docker compose down
@@ -309,34 +367,35 @@ Full reset (including DB data):
 
   docker compose down -v
 
-Local-development behavior (current default):
-- backend, frontend, and all 10 miners are built from local source.
-- `pull_policy: never` is set for those app services in `docker-compose.yml`.
-- This avoids accidental priority of remote app images during local validation.
+Why two compose files exist:
+- `docker-compose.yml` is the canonical stack and defaults to LOCAL BUILD
+  (`pull_policy: never`) so that local code changes are honored during
+  development.
+- `docker-compose.hub.yml` is an override that flips `pull_policy: always`
+  on backend/frontend/miners, which is what enables the no-build Docker
+  Hub path in OPTION A.
 
 ================================================================================
 
-DOCKER HUB / MULTI-ARCH (AMD + ARM)
-------------------------------------
-Published app images (multi-arch: linux/amd64 + linux/arm64):
-- byandyx/btc-backend:latest
-- byandyx/btc-frontend:latest
-- byandyx/btc-miner:latest
-- bitcoin/bitcoin:29.3
+COMMON COMMANDS
+---------------
+Check status:
 
+  docker compose ps
+  docker compose logs -f backend
+
+Persistence:
+- backend SQLite is persisted via volume `backend-data` mounted at /app/data.
+
+================================================================================
+
+PUBLISHING NEW IMAGES (MAINTAINERS ONLY)
+----------------------------------------
 Note on the backend image:
 - backend/Dockerfile installs python3, make and g++ on Alpine so that
   better-sqlite3 can fall back to a node-gyp source build if the
   prebuilt binary cannot be downloaded. This makes multi-arch builds
   reliable on slow networks and on linux/arm64.
-
-To force Docker Hub mode again (without editing compose files), use:
-
-  docker compose -f docker-compose.yml -f docker-compose.hub.yml pull
-  docker compose -f docker-compose.yml -f docker-compose.hub.yml up -d
-
-`docker-compose.hub.yml` sets `pull_policy: always` for backend/frontend/miners.
-This is the clean reversible path between local build mode and Docker Hub mode.
 
 Build and publish your own multi-arch images:
 
@@ -351,11 +410,18 @@ Verify manifest:
 
   docker buildx imagetools inspect <your-namespace>/btc-backend:latest
 
+After publishing, end users can run the stack without building by following
+OPTION A above (docker compose -f docker-compose.yml -f docker-compose.hub.yml
+pull && up -d).
+
 ================================================================================
 
 PHASE 2 MANUAL DEMO / CHECKLIST
 --------------------------------
-1. Start stack with Docker Compose.
+1. Start the stack using OPTION A (no build) — see "HOW TO RUN" above:
+     docker compose -f docker-compose.yml -f docker-compose.hub.yml pull
+     docker compose -f docker-compose.yml -f docker-compose.hub.yml up -d
+   Then open http://localhost:3000.
 2. In UI, set threshold (example: 1), then Start Mining.
 3. Wait for at least one verified miner deposit.
 4. Create a SELL order from an account with BTC available (typically miner-*).
@@ -377,7 +443,9 @@ NOTES FOR GRADING
 -----------------
 - This implementation keeps the Phase 1 blockchain flow intact.
 - Trading in Phase 2 is internal to exchange accounts only.
-- Images are expected to run directly from Docker Hub without local rebuild.
+- The expected run path for grading is OPTION A (Docker Hub, no build) —
+  the two `docker compose -f docker-compose.yml -f docker-compose.hub.yml`
+  commands shown in QUICK START at the top of this README.
 - README includes explicit run, validation, and architecture decisions for
   reproducible grading.
 
