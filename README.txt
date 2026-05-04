@@ -78,10 +78,13 @@ OFFICIAL EXECUTION PATH
 The primary grading path is Docker Hub images through docker-compose.yml.
 
 Published images:
-- byandyx/btc-backend:latest
-- byandyx/btc-frontend:latest
-- byandyx/btc-miner:latest
+- byandyx/btc-backend:latest    (also tagged byandyx/btc-backend:proyecto-final)
+- byandyx/btc-frontend:latest   (also tagged byandyx/btc-frontend:proyecto-final)
+- byandyx/btc-miner:latest      (also tagged byandyx/btc-miner:proyecto-final)
 - bitcoin/bitcoin:29.3
+
+The :latest tag and the :proyecto-final tag point to the same Phase 3 final
+delivery digest. Either tag can be pulled for grading.
 
 Target platforms:
 - linux/amd64
@@ -234,9 +237,17 @@ DOCKER HUB PUBLISHING NOTES
 ---------------------------
 If images need to be republished manually, a standard multi-architecture flow is:
 
-  docker buildx build --platform linux/amd64,linux/arm64 -t byandyx/btc-backend:latest --push ./backend
-  docker buildx build --platform linux/amd64,linux/arm64 -t byandyx/btc-frontend:latest --push ./frontend
-  docker buildx build --platform linux/amd64,linux/arm64 -t byandyx/btc-miner:latest --push ./miner
+  docker buildx build --platform linux/amd64,linux/arm64 \
+    -t byandyx/btc-backend:latest -t byandyx/btc-backend:proyecto-final \
+    --push ./backend
+
+  docker buildx build --platform linux/amd64,linux/arm64 \
+    -t byandyx/btc-frontend:latest -t byandyx/btc-frontend:proyecto-final \
+    --push ./frontend
+
+  docker buildx build --platform linux/amd64,linux/arm64 \
+    -t byandyx/btc-miner:latest -t byandyx/btc-miner:proyecto-final \
+    --push ./miner
 
 Use this only when updating the published images. The grading path itself should
 run directly from docker-compose.yml with the published images.
