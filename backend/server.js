@@ -58,6 +58,14 @@ function roundUSD(value) {
   return Number((Number(value) || 0).toFixed(2));
 }
 
+function formatBtcForDetails(value) {
+  return roundBTC(value).toFixed(8);
+}
+
+function formatUsdForDetails(value) {
+  return roundUSD(value).toFixed(2);
+}
+
 function isPositiveNumber(value) {
   return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
@@ -107,6 +115,18 @@ function validateOrderInput({ side, type, price, amount }) {
 
   if (!isPositiveNumber(amount)) {
     return { valid: false, error: 'amount must be a positive number' };
+  }
+
+  return { valid: true };
+}
+
+function validateTransferInput({ amount, destinationAddress }) {
+  if (!isPositiveNumber(amount)) {
+    return { valid: false, error: 'amount must be a positive number' };
+  }
+
+  if (!destinationAddress || typeof destinationAddress !== 'string') {
+    return { valid: false, error: 'destinationAddress is required' };
   }
 
   return { valid: true };
@@ -364,6 +384,28 @@ function initDatabase() {
 
     CREATE INDEX IF NOT EXISTS idx_trades_created_at
       ON trades(created_at, id);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS client_btc_history (
+      id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+      client_id           TEXT NOT NULL,
+      account_identifier  TEXT NOT NULL,
+      client_name_snapshot TEXT NOT NULL,
+      event_type          TEXT NOT NULL CHECK(event_type IN ('BUY_BTC', 'SELL_BTC', 'TRANSFER_BTC')),
+      btc_amount          REAL NOT NULL,
+      price_per_btc       REAL,
+      details_text        TEXT NOT NULL,
+      related_trade_id    INTEGER,
+      related_txid        TEXT,
+      created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_client_btc_history_client_time
+      ON client_btc_history(client_id, created_at DESC, id DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_client_btc_history_created_at
+      ON client_btc_history(created_at DESC, id DESC);
   `);
 
   migrateAccountsTable();
@@ -624,6 +666,50 @@ function prepareStatements() {
   `);
 
   stmts.getOwnerAccount = db.prepare(`SELECT * FROM accounts WHERE id = 'owner'`);
+  stmts.insertHistoryEvent = db.prepare(`
+    INSERT INTO client_btc_history (
+      client_id,
+      account_identifier,
+      client_name_snapshot,
+      event_type,
+      btc_amount,
+      price_per_btc,
+      details_text,
+      related_trade_id,
+      related_txid,
+      created_at
+    )
+    VALUES (
+      @client_id,
+      @account_identifier,
+      @client_name_snapshot,
+      @event_type,
+      @btc_amount,
+      @price_per_btc,
+      @details_text,
+      @related_trade_id,
+      @related_txid,
+      @created_at
+    )
+  `);
+  stmts.getAccountHistory = db.prepare(`
+    SELECT
+      id,
+      client_id,
+      account_identifier,
+      client_name_snapshot,
+      event_type,
+      btc_amount,
+      price_per_btc,
+      details_text,
+      related_trade_id,
+      related_txid,
+      created_at
+    FROM client_btc_history
+    WHERE client_id = ?
+    ORDER BY created_at DESC, id DESC
+    LIMIT 500
+  `);
 }
 
 function normalizeAccount(account) {
@@ -650,6 +736,70 @@ function saveAccount(account) {
     usd_balance: normalized.usd_balance,
   });
   return normalized;
+}
+
+function buildHistoryDetails(eventType, { btcAmount, pricePerBtc, destinationAddress, txid }) {
+  if (eventType === 'BUY_BTC') {
+    return `Received ${formatBtcForDetails(btcAmount)} BTC at $${formatUsdForDetails(pricePerBtc)} per BTC`;
+  }
+
+  if (eventType === 'SELL_BTC') {
+    return `Sold ${formatBtcForDetails(btcAmount)} BTC at $${formatUsdForDetails(pricePerBtc)} per BTC`;
+  }
+
+  if (eventType === 'TRANSFER_BTC') {
+    let details = `Transferred ${formatBtcForDetails(btcAmount)} BTC out of the exchange`;
+    if (destinationAddress) {
+      details += ` to ${destinationAddress}`;
+    }
+    if (txid) {
+      details += ` (txid: ${txid})`;
+    }
+    return details;
+  }
+
+  return `BTC event: ${formatBtcForDetails(btcAmount)} BTC`;
+}
+
+function insertHistoryEvent({
+  clientId,
+  clientName,
+  eventType,
+  btcAmount,
+  pricePerBtc = null,
+  detailsText,
+  relatedTradeId = null,
+  relatedTxid = null,
+  createdAt = nowIso(),
+}) {
+  stmts.insertHistoryEvent.run({
+    client_id: clientId,
+    account_identifier: clientId,
+    client_name_snapshot: clientName,
+    event_type: eventType,
+    btc_amount: roundBTC(btcAmount),
+    price_per_btc: pricePerBtc === null ? null : roundUSD(pricePerBtc),
+    details_text: detailsText,
+    related_trade_id: relatedTradeId,
+    related_txid: relatedTxid,
+    created_at: createdAt,
+  });
+}
+
+function mapHistoryEvent(row) {
+  return {
+    id: row.id,
+    accountIdentifier: row.account_identifier,
+    clientId: row.client_id,
+    clientName: row.client_name_snapshot,
+    timestamp: row.created_at,
+    eventType: row.event_type,
+    eventDetails: row.details_text,
+    btcAmount: roundBTC(row.btc_amount),
+    pricePerBtc: row.price_per_btc === null ? null : roundUSD(row.price_per_btc),
+    relatedTradeId: row.related_trade_id,
+    relatedTxid: row.related_txid,
+  };
 }
 
 function getCurrentThreshold() {
@@ -706,6 +856,17 @@ function getTradingEligibleAccountOrThrow(clientId) {
   }
   if (account.type === 'owner') {
     throw new Error('Owner account cannot place orders');
+  }
+  return account;
+}
+
+function getTransferEligibleAccountOrThrow(clientId) {
+  const account = stmts.getAccount.get(clientId);
+  if (!account) {
+    throw new Error('Account not found');
+  }
+  if (account.type === 'owner') {
+    throw new Error('Owner account cannot transfer BTC');
   }
   return account;
 }
@@ -815,6 +976,28 @@ function settleTradeNoPartial(takerOrder, makerOrder) {
     tradeAt,
   );
 
+  insertHistoryEvent({
+    clientId: buyOrder.client_id,
+    clientName: buyer.name,
+    eventType: 'BUY_BTC',
+    btcAmount: btcNetToBuyer,
+    pricePerBtc: tradePrice,
+    detailsText: buildHistoryDetails('BUY_BTC', { btcAmount: btcNetToBuyer, pricePerBtc: tradePrice }),
+    relatedTradeId: insertResult.lastInsertRowid,
+    createdAt: tradeAt,
+  });
+
+  insertHistoryEvent({
+    clientId: sellOrder.client_id,
+    clientName: seller.name,
+    eventType: 'SELL_BTC',
+    btcAmount: amount,
+    pricePerBtc: tradePrice,
+    detailsText: buildHistoryDetails('SELL_BTC', { btcAmount: amount, pricePerBtc: tradePrice }),
+    relatedTradeId: insertResult.lastInsertRowid,
+    createdAt: tradeAt,
+  });
+
   return {
     id: insertResult.lastInsertRowid,
     buy_order_id: buyOrder.id,
@@ -900,6 +1083,39 @@ const cancelOrderTx = db.transaction((orderId) => {
   stmts.cancelOrder.run(nowIso(), orderId);
 
   return stmts.getOrderById.get(orderId);
+});
+
+const recordTransferTx = db.transaction(({ clientId, amount, txid, destinationAddress }) => {
+  const account = getTransferEligibleAccountOrThrow(clientId);
+  const updated = { ...account };
+  const needed = roundBTC(amount);
+
+  if (roundBTC(updated.btc_available) + BTC_EPSILON < needed) {
+    throw new Error('Insufficient available BTC');
+  }
+
+  updated.btc_available = roundBTC(updated.btc_available - needed);
+  const saved = saveAccount(updated);
+  const createdAt = nowIso();
+
+  insertHistoryEvent({
+    clientId: saved.id,
+    clientName: saved.name,
+    eventType: 'TRANSFER_BTC',
+    btcAmount: needed,
+    detailsText: buildHistoryDetails('TRANSFER_BTC', {
+      btcAmount: needed,
+      destinationAddress,
+      txid,
+    }),
+    relatedTxid: txid,
+    createdAt,
+  });
+
+  return {
+    account: saved,
+    createdAt,
+  };
 });
 
 // ---------------------------------------------------------------------------
@@ -1081,6 +1297,18 @@ async function verifyOnChainTransaction(txid, expectedAddress, expectedAmount) {
 
   if (pendingResult) return pendingResult;
   return { valid: false, error: errors.join(' | ') };
+}
+
+async function validateDestinationAddress(destinationAddress) {
+  try {
+    const validation = await bitcoinRpc('validateaddress', [destinationAddress]);
+    if (!validation || !validation.isvalid) {
+      return { valid: false, error: 'Destination address is not a valid regtest address' };
+    }
+    return { valid: true, validation };
+  } catch (err) {
+    return { valid: false, error: 'Could not validate destination address' };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1378,6 +1606,21 @@ app.get('/api/accounts/:id', (req, res) => {
   });
 });
 
+app.get('/api/clients/:clientId/history', (req, res) => {
+  const account = stmts.getAccount.get(req.params.clientId);
+  if (!account) {
+    return res.status(404).json({ error: 'Client account not found.' });
+  }
+
+  const events = stmts.getAccountHistory.all(req.params.clientId).map(mapHistoryEvent);
+  res.json({
+    clientId: account.id,
+    clientName: account.name,
+    order: 'desc',
+    events,
+  });
+});
+
 app.get('/api/owner/fees', (_req, res) => {
   const owner = stmts.getOwnerAccount.get();
   if (!owner) {
@@ -1494,6 +1737,66 @@ app.get('/api/trades', (_req, res) => {
     usd_amount: roundUSD(t.usd_amount),
   }));
   res.json(trades);
+});
+
+app.post('/api/clients/:clientId/transfer-btc', async (req, res) => {
+  const clientId = req.params.clientId;
+  const amount = Number(req.body.amount);
+  const destinationAddress = String(req.body.destinationAddress || '').trim();
+
+  const validation = validateTransferInput({ amount, destinationAddress });
+  if (!validation.valid) {
+    return res.status(400).json({ error: validation.error });
+  }
+
+  try {
+    const account = getTransferEligibleAccountOrThrow(clientId);
+    const addressValidation = await validateDestinationAddress(destinationAddress);
+    if (!addressValidation.valid) {
+      return res.status(400).json({ error: addressValidation.error });
+    }
+
+    if (roundBTC(account.btc_available) + BTC_EPSILON < roundBTC(amount)) {
+      return res.status(400).json({ error: 'Insufficient available BTC' });
+    }
+
+    const walletBalances = await bitcoinRpc('getbalances', [], 'exchange');
+    const exchangeTrustedBtc = Number(walletBalances?.mine?.trusted || 0);
+    if (exchangeTrustedBtc + BTC_EPSILON < roundBTC(amount)) {
+      return res.status(400).json({ error: 'Exchange wallet does not have enough spendable BTC for this transfer' });
+    }
+
+    const txid = await bitcoinRpc('sendtoaddress', [destinationAddress, roundBTC(amount)], 'exchange');
+    const result = recordTransferTx({
+      clientId,
+      amount,
+      txid,
+      destinationAddress,
+    });
+
+    const events = stmts.getAccountHistory.all(clientId).map(mapHistoryEvent);
+    io.emit('orders-updated', { timestamp: nowIso() });
+    io.emit('history-updated', { clientId, timestamp: result.createdAt });
+
+    res.status(201).json({
+      status: 'ok',
+      txid,
+      account: result.account,
+      history: {
+        clientId,
+        order: 'desc',
+        events,
+      },
+    });
+  } catch (err) {
+    logStructured('btc_transfer_failed', 'warning', {
+      client_id: clientId,
+      error: err.message,
+    });
+
+    const status = err.message === 'Account not found' ? 404 : 400;
+    res.status(status).json({ error: err.message || 'BTC transfer failed' });
+  }
 });
 
 app.post('/api/exchange/deposit', async (req, res) => {

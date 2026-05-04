@@ -17,6 +17,14 @@ function App() {
   const [completedOrders, setCompletedOrders] = useState([]);
   const [trades, setTrades] = useState([]);
   const [ownerFees, setOwnerFees] = useState(0);
+  const [historyClientId, setHistoryClientId] = useState('');
+  const [historyEvents, setHistoryEvents] = useState([]);
+  const [historyClientName, setHistoryClientName] = useState('');
+  const [historyError, setHistoryError] = useState('');
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [transferClientId, setTransferClientId] = useState('');
+  const [transferAmount, setTransferAmount] = useState('');
+  const [transferDestinationAddress, setTransferDestinationAddress] = useState('');
 
   const [orderClientId, setOrderClientId] = useState('');
   const [orderSide, setOrderSide] = useState('buy');
@@ -64,11 +72,21 @@ function App() {
           const defaultTrader = list.find((a) => a.type !== 'owner');
           if (defaultTrader) setOrderClientId(defaultTrader.id);
         }
+
+        if (!historyClientId && list.length > 0) {
+          const defaultHistoryClient = list.find((a) => a.type !== 'owner');
+          if (defaultHistoryClient) setHistoryClientId(defaultHistoryClient.id);
+        }
+
+        if (!transferClientId && list.length > 0) {
+          const defaultTransferClient = list.find((a) => a.type !== 'owner');
+          if (defaultTransferClient) setTransferClientId(defaultTransferClient.id);
+        }
       }
     } catch (err) {
       console.error('Failed to fetch accounts:', err);
     }
-  }, [orderClientId]);
+  }, [historyClientId, orderClientId, transferClientId]);
 
   const fetchOrders = useCallback(async () => {
     try {
@@ -112,6 +130,39 @@ function App() {
       }
     } catch (err) {
       console.error('Failed to fetch owner fees:', err);
+    }
+  }, []);
+
+  const fetchHistory = useCallback(async (clientId) => {
+    if (!clientId) {
+      setHistoryEvents([]);
+      setHistoryClientName('');
+      setHistoryError('');
+      return;
+    }
+
+    setHistoryLoading(true);
+    setHistoryError('');
+
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/clients/${clientId}/history`);
+      const data = await res.json();
+
+      if (!res.ok) {
+        setHistoryEvents([]);
+        setHistoryClientName('');
+        setHistoryError(data?.error || 'Failed to load BTC history');
+        return;
+      }
+
+      setHistoryEvents(Array.isArray(data?.events) ? data.events : []);
+      setHistoryClientName(data?.clientName || '');
+    } catch (err) {
+      setHistoryEvents([]);
+      setHistoryClientName('');
+      setHistoryError(err.message || 'Failed to load BTC history');
+    } finally {
+      setHistoryLoading(false);
     }
   }, []);
 
@@ -214,6 +265,7 @@ function App() {
       fetchOrders();
       fetchTrades();
       fetchOwnerFees();
+      if (historyClientId) fetchHistory(historyClientId);
     });
 
     socket.on('trade-executed', (trade) => {
@@ -225,6 +277,14 @@ function App() {
       fetchOrders();
       fetchTrades();
       fetchOwnerFees();
+      if (historyClientId) fetchHistory(historyClientId);
+    });
+
+    socket.on('history-updated', (data) => {
+      if (!historyClientId) return;
+      if (!data?.clientId || data.clientId === historyClientId) {
+        fetchHistory(historyClientId);
+      }
     });
 
     fetchMiners();
@@ -252,7 +312,13 @@ function App() {
       clearInterval(feesInterval);
       socket.disconnect();
     };
-  }, [addLog, fetchAccounts, fetchMiners, fetchOrders, fetchOwnerFees, fetchSystemStatus, fetchTrades]);
+  }, [addLog, fetchAccounts, fetchHistory, fetchMiners, fetchOrders, fetchOwnerFees, fetchSystemStatus, fetchTrades, historyClientId]);
+
+  useEffect(() => {
+    if (historyClientId) {
+      fetchHistory(historyClientId);
+    }
+  }, [fetchHistory, historyClientId]);
 
   const handleSetThreshold = async () => {
     const value = parseFloat(threshold);
@@ -363,6 +429,9 @@ function App() {
       fetchOrders();
       fetchTrades();
       fetchOwnerFees();
+      if (historyClientId === orderClientId) {
+        fetchHistory(historyClientId);
+      }
     } catch (err) {
       addLog(`Order error: ${err.message}`, 'error');
     }
@@ -405,6 +474,52 @@ function App() {
       fetchOwnerFees();
     } catch (err) {
       addLog(`Cancel error: ${err.message}`, 'error');
+    }
+  };
+
+  const handleTransferBtc = async () => {
+    const amount = Number(transferAmount);
+
+    if (!transferClientId) {
+      addLog('Select an account for the BTC transfer', 'warning');
+      return;
+    }
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      addLog('Transfer amount must be positive', 'warning');
+      return;
+    }
+
+    if (!transferDestinationAddress.trim()) {
+      addLog('Destination address is required', 'warning');
+      return;
+    }
+
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/clients/${transferClientId}/transfer-btc`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount,
+          destinationAddress: transferDestinationAddress.trim(),
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        addLog(data.error || 'BTC transfer failed', 'error');
+        return;
+      }
+
+      addLog(`BTC transfer sent for ${transferClientId}: ${formatBtc(amount)} BTC`, 'success');
+      setTransferAmount('');
+      setTransferDestinationAddress('');
+      fetchAccounts();
+      if (historyClientId === transferClientId) {
+        fetchHistory(historyClientId);
+      }
+    } catch (err) {
+      addLog(`Transfer error: ${err.message}`, 'error');
     }
   };
 
@@ -466,7 +581,7 @@ function App() {
   return (
     <div className="app">
       <header className="header">
-        <h1>Simulated Bitcoin Exchange - Phase 2</h1>
+        <h1>Simulated Bitcoin Exchange - Final Project</h1>
         <div className="header-status">
           <div className="status-indicator" style={{ backgroundColor: getBackendStatusColor() }}></div>
           <span>{backendStatus === 'connected' ? 'Connected' : backendStatus === 'connecting' ? 'Connecting...' : 'Disconnected'}</span>
@@ -520,7 +635,7 @@ function App() {
       </section>
 
       <section className="section trading-section">
-        <h2>Trading Panel (Phase 2)</h2>
+        <h2>Trading Panel (Phase 2 Core)</h2>
         <div className="trading-grid">
           <div className="order-form">
             <label>Client / Trader</label>
@@ -769,6 +884,96 @@ function App() {
         <AccountsTable rows={minerAccounts} />
       </section>
 
+      <section className="section history-section">
+        <div className="section-heading-row">
+          <h2>BTC History (Phase 3)</h2>
+          <span className="history-order-note">Newest first</span>
+        </div>
+
+        <div className="history-grid">
+          <div className="history-controls">
+            <label>Client / Account</label>
+            <select value={historyClientId} onChange={(e) => setHistoryClientId(e.target.value)}>
+              <option value="">Select account</option>
+              {traderAccounts.map((a) => (
+                <option key={a.id} value={a.id}>{a.id} - {a.name}</option>
+              ))}
+            </select>
+            {historyClientId && (
+              <p className="history-meta">
+                Viewing: <strong>{historyClientName || historyClientId}</strong>
+              </p>
+            )}
+            {historyError && <p className="status-message error-text">{historyError}</p>}
+          </div>
+
+          <div className="transfer-card">
+            <h3>Transfer BTC Out</h3>
+
+            <label>Client / Account</label>
+            <select value={transferClientId} onChange={(e) => setTransferClientId(e.target.value)}>
+              <option value="">Select account</option>
+              {traderAccounts.map((a) => (
+                <option key={a.id} value={a.id}>{a.id} - {a.name}</option>
+              ))}
+            </select>
+
+            <label>Amount (BTC)</label>
+            <input
+              type="number"
+              min="0"
+              step="0.00000001"
+              value={transferAmount}
+              onChange={(e) => setTransferAmount(e.target.value)}
+              placeholder="e.g. 0.10000000"
+            />
+
+            <label>Destination Address</label>
+            <input
+              type="text"
+              value={transferDestinationAddress}
+              onChange={(e) => setTransferDestinationAddress(e.target.value)}
+              placeholder="bcrt1..."
+            />
+
+            <button className="btn-primary" onClick={handleTransferBtc}>Transfer BTC</button>
+          </div>
+        </div>
+
+        <div className="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Account ID</th>
+                <th>Client Name</th>
+                <th>Timestamp</th>
+                <th>Event Type</th>
+                <th>Event Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!historyClientId ? (
+                <tr><td colSpan="5" className="empty-row">Select an account to view BTC history.</td></tr>
+              ) : historyLoading ? (
+                <tr><td colSpan="5" className="empty-row">Loading BTC history...</td></tr>
+              ) : historyEvents.length === 0 ? (
+                <tr><td colSpan="5" className="empty-row">No BTC history for this account yet.</td></tr>
+              ) : (
+                historyEvents.map((event) => (
+                  <tr key={event.id}>
+                    <td>{event.accountIdentifier}</td>
+                    <td>{event.clientName}</td>
+                    <td>{formatDate(event.timestamp)}</td>
+                    <td>{formatEventType(event.eventType)}</td>
+                    <td>{event.eventDetails}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <section className="section logs-section">
         <h2>Event Log ({logs.length})</h2>
         <div className="logs-container">
@@ -856,6 +1061,13 @@ function formatDate(iso) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return String(iso);
   return date.toLocaleString();
+}
+
+function formatEventType(eventType) {
+  if (eventType === 'BUY_BTC') return 'Buy BTC';
+  if (eventType === 'SELL_BTC') return 'Sell BTC';
+  if (eventType === 'TRANSFER_BTC') return 'Transfer BTC';
+  return eventType || '-';
 }
 
 export default App;

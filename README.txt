@@ -1,22 +1,16 @@
 ================================================================================
-Simulated Bitcoin Exchange - Phase 2
+Simulated Bitcoin Exchange - Final Project (Phase 3)
 CMP-5001-202520 - Aplicaciones Distribuidas
 ================================================================================
 
 PROJECT TITLE
 -------------
-Simulated Bitcoin Exchange - Phase 2
+Simulated Bitcoin Exchange - Final Project
 
-This project extends the Phase 1 implementation and adds the internal trading
-subsystem required for Phase 2.
-
-Main additions in this phase:
-- internal BTC and USD balances with available and reserved amounts
-- limit buy and limit sell orders
-- matching engine with price and time priority
-- completed trades persistence
-- owner 2% BTC fee accrual
-- React interface for balances, orders, and trades
+This delivery integrates all three phases:
+- Phase 1: regtest blockchain, miners, maturity tracking, and verified deposits
+- Phase 2: internal exchange trading with reserved balances and owner fee
+- Phase 3: BTC history per client and BTC transfer-out history events
 
 ================================================================================
 
@@ -27,138 +21,62 @@ TEAM MEMBERS
 
 CONTRIBUTIONS
 -------------
-ANDRES PROANO:
-- Bitcoin regtest network
-- miner containers and mining workflow
-- Docker orchestration
-- on chain deposit verification support
+ANDRES PROANO
+- Bitcoin Core regtest network setup
+- miner containers and Python mining workflow
+- Docker orchestration and service integration
+- on-chain transfer and deposit verification support
 
-PABLO ALVARADO:
-- internal exchange account model
-- SQLite persistence
-- backend API for Phase 2 trading
-- React UI for orders, balances, and trades
-- validation and documentation alignment
+PABLO ALVARADO
+- SQLite exchange persistence model
+- Node.js / Express backend APIs
+- internal trading engine for Phase 2
+- client BTC history and transfer-out support for Phase 3
+- React frontend for balances, trading, history, and demo flow
+- README and delivery alignment
 
-SHARED WORK:
-- Docker Compose integration
-- end to end testing
-- validation of the boundary between blockchain deposits and internal trading
+SHARED WORK
+- end-to-end testing
 - Docker Hub publishing workflow
+- validation of blockchain system vs exchange system boundary
+- final integration and demo verification
 
 ================================================================================
 
-HOW TO RUN THE PROJECT
-======================
+BIG PICTURE
+-----------
+This project contains two clearly separated systems:
 
-OFFICIAL NORMAL USE
----------------------------------------
-The primary execution path is Docker Hub.
+1. Blockchain system
+- Two Bitcoin Core nodes run in regtest.
+- Ten miners compete by building and submitting blocks.
+- BTC is created only by mining.
+- Coinbase maturity is respected before BTC becomes spendable.
+- Mature BTC reaches the exchange only after an on-chain transfer is verified.
 
-Considerations:
-- no local code changes required
-- no local build required
-- services are pulled from Docker Hub and then started
+2. Exchange system
+- SQLite stores internal exchange accounts.
+- 30 client accounts start with 30000 USD each.
+- Miner accounts are created only after verified on-chain deposits to the
+  exchange deposit address.
+- Trading in Phase 2 and Phase 3 is internal to the exchange.
+- The owner receives a 2% fee in BTC on every executed trade.
+- Phase 3 adds BTC event history per account:
+  - Buy BTC
+  - Sell BTC
+  - Transfer BTC
 
-Files needed:
-- docker-compose.yml
-
-Recommended steps:
-1. Create an empty folder
-2. Copy only this file into that folder:
-   - docker-compose.yml
-3. Run:
-
-  docker compose pull
-  docker compose up -d
-
-Open the frontend in the browser:
-
-  http://localhost:3000
-
-Check containers:
-
-  docker compose ps
-
-Check backend logs:
-
-  docker compose logs -f backend
-
-Stop the system:
-
-  docker compose down
-
-Important note:
-This is the main execution process that should be used for evaluation.
+Important boundary:
+- BTC is not inside the exchange just because a miner wallet owns BTC.
+- BTC enters the exchange only after an on-chain transaction sends it to the
+  exchange address and the backend verifies receipt.
 
 ================================================================================
 
-HOW TO TEST THE SYSTEM AFTER STARTUP
-------------------------------------
-1. Open the frontend at:
+OFFICIAL EXECUTION PATH
+-----------------------
+The primary grading path is Docker Hub images through docker-compose.yml.
 
-  http://localhost:3000
-
-2. Set a threshold value, for example:
-
-  1
-
-3. Start mining.
-
-4. Wait until at least one miner reaches the threshold, matures enough BTC,
-   and sends BTC to the exchange deposit address.
-
-5. Verify in the accounts section that:
-   - miner accounts appear inside the exchange
-   - at least one miner has BTC available
-   - 30 client accounts exist with USD 30000 each
-   - owner account exists
-
-6. Create a SELL order from an account with BTC available.
-
-7. Create a BUY order from a funded USD client with the same BTC amount and a
-   compatible price.
-
-8. Verify the expected results:
-   - the trade appears in Completed Trades
-   - the BUY and SELL orders leave Open Orders
-   - seller receives USD
-   - buyer receives BTC net of fee
-   - owner fee increases by 2% of the gross BTC amount
-
-9. Create an order with no compatible opposite order and verify:
-   - it stays in Open Orders
-   - reserved funds are visible
-
-10. Cancel that open order and verify:
-   - reserved funds return to available funds
-   - the order appears as cancelled
-
-================================================================================
-
-EXPECTED DEMO FLOW
-------------------
-A correct demo should look like this:
-
-1. The system starts
-2. Mining is started
-3. BTC is mined
-4. BTC matures
-5. Mature BTC is transferred on chain to the exchange
-6. Backend verifies deposit
-7. Miner account receives internal BTC
-8. A trader places a sell order
-9. Another trader places a compatible buy order
-10. The exchange matches them internally
-11. Buyer receives net BTC
-12. Seller receives USD
-13. Owner accumulates 2% BTC fee
-14. Tables update in the interface
-
-================================================================================
-
-DOCKER IMAGES
--------------
 Published images:
 - byandyx/btc-backend:latest
 - byandyx/btc-frontend:latest
@@ -169,226 +87,175 @@ Target platforms:
 - linux/amd64
 - linux/arm64
 
+Files needed:
+- docker-compose.yml
+
+Commands:
+
+  docker compose pull
+  docker compose up -d
+
+Open:
+
+  Frontend: http://localhost:3000
+  Backend API: http://localhost:3001
+
+Useful commands:
+
+  docker compose ps
+  docker compose logs -f backend
+  docker compose down
+
 ================================================================================
 
-LOCAL DEVELOPMENT MODE
-----------------------
-This section is only for development or if someone wants to modify the code.
+LOCAL BUILD / DEVELOPMENT MODE
+------------------------------
+If you cloned the repository and want to build the local source code instead of
+using Docker Hub images, use docker-compose.yml together with
+docker-compose.dev.yml.
 
-If you cloned the repository and want to build locally, use:
+Build and start:
 
   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d
 
 Open:
 
-  http://localhost:3000
+  Frontend: http://localhost:3000
+  Backend API: http://localhost:3001
 
-Check logs:
+Useful commands:
 
+  docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
   docker compose -f docker-compose.yml -f docker-compose.dev.yml logs -f backend
-
-Stop:
-
   docker compose -f docker-compose.yml -f docker-compose.dev.yml down
 
-Full reset including SQLite volume:
+Full reset including SQLite and node volumes:
 
   docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v
 
 ================================================================================
 
-NOTES
------
-- The grading path should use Docker Hub images directly.
-- The local build path is only an extra for development and debugging.
-- The blockchain layer and the exchange layer remain clearly separated.
-- Internal Phase 2 trades do not generate blockchain transactions.
+HOW TO RUN THE DEMO
+-------------------
+1. Start the system with one of the two modes above.
+2. Open http://localhost:3000
+3. In Mining Control, set threshold to:
+
+  1
+
+4. Click Start Mining.
+5. Wait until at least one miner transfers mature BTC to the exchange.
+6. Verify:
+- miner exchange accounts appear
+- at least one miner has BTC available
+- 30 client accounts exist with 30000 USD each
+- owner account exists
 
 ================================================================================
 
-================================================================================
-
-BIG PICTURE
------------
-Phase 1 remains the foundation:
-- BTC is created by mining in regtest
-- mined rewards must mature before spending
-- once threshold is reached, BTC is sent on chain to the exchange deposit address
-- after backend verification, BTC is credited internally to the corresponding
-  miner account inside the exchange
-
-Phase 2 adds internal exchange trading:
-- clients can place limit buy and limit sell orders
-- the exchange matches compatible orders
-- balances are updated internally
-- the owner receives a 2% fee in BTC on each executed trade
-
-Important boundary:
-- BTC enters the exchange only after a verified on chain deposit
-- trades in this phase are INTERNAL ONLY
-- no blockchain transaction is created for each internal trade
-
-================================================================================
-
-TRADING DESIGN DECISIONS
-------------------------
-1. No partial fills
-   - An order stays OPEN until it can be fully matched
-   - Execution happens only when a compatible opposite order exists with the
-     same BTC amount
-   - When matched, both orders are completed fully
-
-2. Trade price
-   - Trade price is the maker price
-   - In other words, the trade uses the price of the order that was already
-     open in the order book
-
-3. Owner fee
-   - Owner fee is 2% of the gross BTC trade amount
-   - The fee is taken from the BTC side
-   - Buyer receives net BTC
-   - Owner receives fee BTC
-   - Seller receives USD for the full gross BTC amount at trade price
-
-4. Rounding
-   - BTC uses 8 decimals
-   - USD uses 2 decimals
+FINAL DEMO FLOW FOR THE PROFESSOR
+---------------------------------
+1. Start with docker compose.
+2. Open the frontend.
+3. Set threshold to 1 BTC.
+4. Start mining.
+5. Wait for a miner deposit to be verified by the backend.
+6. Open the accounts tables and verify miner BTC and client USD balances.
+7. Create a SELL order from a miner account with BTC.
+8. Create a compatible BUY order from a client with USD.
+9. Verify:
+- trade appears in Completed Trades
+- balances update
+- owner fee increases by 2% of gross BTC traded
+- completed/cancelled orders table updates
+10. Open BTC History.
+11. Select the buyer account and verify a Buy BTC event.
+12. Select the seller account and verify a Sell BTC event.
+13. Use Transfer BTC Out from an account with BTC.
+14. Enter a valid regtest destination address and BTC amount.
+15. Verify:
+- BTC balance decreases internally
+- a Transfer BTC event appears in the account history
+- the event includes amount and transaction information
 
 ================================================================================
 
-ARCHITECTURE SUMMARY
---------------------
-BLOCKCHAIN LAYER
-- 2 Bitcoin Core nodes in regtest using bitcoin/bitcoin:29.3
+PHASE 1 CHECKLIST
+-----------------
+- 2 Bitcoin Core nodes in regtest
+- 10 miners in separate containers
+- configurable threshold from React
+- mined BTC and mature BTC reporting
+- mature BTC transferred on-chain to the exchange
+- miner accounts created after verified deposit
+- 30 client accounts seeded with 30000 USD each
+- blockchain and exchange systems kept separate
 
-MINING LAYER
-- 10 Python miner containers
-- threshold based deposit flow to the exchange wallet
-
-BACKEND
-- Node.js
-- Express
-- Socket.IO
-- SQLite with better-sqlite3
-
-FRONTEND
-- React
-- Vite
-- served in container
-
-================================================================================
-
-ACCOUNTS AND BALANCES
----------------------
-Each account inside the exchange keeps internal balances:
-
-- btc_available
-- btc_reserved
-- usd_available
-- usd_reserved
-
-Meaning:
-- available BTC can be used for new sell orders
-- reserved BTC is locked by open sell orders
-- available USD can be used for new buy orders
-- reserved USD is locked by open buy orders
-
-The owner also has an internal account where BTC fees are accumulated.
-
-================================================================================
-
-ORDERING AND MATCHING RULES
----------------------------
-Buy priority:
-- higher price first
-- if same price, earlier order first
-
-Sell priority:
-- lower price first
-- if same price, earlier order first
-
-Compatibility:
-- buy can match sell if buy.price >= sell.price
-- sell can match buy if sell.price <= buy.price
-
-================================================================================
-
-BALANCE MOVEMENT RULES
-----------------------
-On sell order creation:
-- btc_available decreases
-- btc_reserved increases
-
-On buy order creation:
-- usd_available decreases
-- usd_reserved increases
-
-On trade execution:
-- seller loses reserved BTC gross amount
-- buyer pays USD based on trade price
-- seller receives USD
-- buyer receives BTC net of fee
-- owner receives 2% BTC fee
-
-On order cancellation:
-- reserved funds return to available funds
-
-================================================================================
-
-PHASE 2 USER INTERFACE
-----------------------
-The interface includes:
-
-- mining controls from Phase 1
-- miners table
-- trading panel
-- accounts table
+PHASE 2 CHECKLIST
+-----------------
+- client selector
+- available and reserved BTC/USD balances
+- limit buy and limit sell orders
+- validation of funds, price, and amount
+- reserved-funds protection
+- price-time priority matching
+- full match or no match policy
+- internal trade execution
+- owner 2% BTC fee
 - open orders table
-- completed trades table
-- completed and cancelled orders table
-- owner fee card
+- completed orders / completed trades tables
 
-Mining table metrics are separated to make Phase 1 behavior clearer:
-- BTC mined accumulated
-- BTC matured accumulated
-- BTC sent to exchange accumulated
-- BTC sent elsewhere accumulated if applicable
-- BTC matured remaining
-
-This makes it easier to understand the difference between mined BTC,
-matured BTC, transferred BTC, and currently remaining spendable BTC.
+PHASE 3 CHECKLIST
+-----------------
+- BTC history per client account
+- Buy BTC events
+- Sell BTC events
+- Transfer BTC events
+- history UI table
+- minimal BTC transfer-out operation from the exchange wallet
 
 ================================================================================
 
-BACKEND API
------------
-Health and status:
-- GET /api/health
-- GET /api/system-status
-- GET /api/diagnostics
-
-Phase 1:
-- GET  /api/threshold
-- POST /api/threshold
-- POST /api/start
-- POST /api/stop
-- POST /api/miner-register
-- POST /api/miner-update
-- POST /api/exchange/deposit
-- GET  /api/exchange/addresses
-- GET  /api/miners
-
-Accounts:
+API NOTES
+---------
+Main relevant endpoints:
+- GET /api/miners
 - GET /api/accounts
-- GET /api/accounts/:id
-
-Orders:
-- POST   /api/orders
-- GET    /api/orders/open
-- GET    /api/orders/completed
-- DELETE /api/orders/completed
-- POST   /api/orders/:id/cancel
-
-Trades and fees:
+- POST /api/orders
+- POST /api/orders/:id/cancel
 - GET /api/trades
 - GET /api/owner/fees
+- GET /api/clients/:clientId/history
+- POST /api/clients/:clientId/transfer-btc
+
+================================================================================
+
+DOCKER HUB PUBLISHING NOTES
+---------------------------
+If images need to be republished manually, a standard multi-architecture flow is:
+
+  docker buildx build --platform linux/amd64,linux/arm64 -t byandyx/btc-backend:latest --push ./backend
+  docker buildx build --platform linux/amd64,linux/arm64 -t byandyx/btc-frontend:latest --push ./frontend
+  docker buildx build --platform linux/amd64,linux/arm64 -t byandyx/btc-miner:latest --push ./miner
+
+Use this only when updating the published images. The grading path itself should
+run directly from docker-compose.yml with the published images.
+
+================================================================================
+
+NOTES
+-----
+- The official evaluation path should not require rebuilding code locally.
+- The local build path exists only for development, debugging, and validation.
+- Internal exchange trades do not generate blockchain transactions.
+- BTC history in Phase 3 is generated for new events executed by this final
+  version of the system.
+
+================================================================================
+
+Transfer OUT BTC
+
+1. docker compose exec node1 bitcoin-cli -regtest -rpcuser=bitcoin -rpcpassword=bitcoin createwallet "receiver"
+
+# Para extraer el address tenemos:
+2. docker compose exec node1 bitcoin-cli -regtest -rpcuser=bitcoin -rpcpassword=bitcoin -rpcwallet=receiver getnewaddress "btc-out-demo" bech32
